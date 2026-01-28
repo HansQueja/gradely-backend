@@ -238,7 +238,7 @@ class UploadStudentsView(APIView):
                         name = str(row['name']).strip().title()
                         
                         # Format: "26" + "-" + "00001" (padded to 5 digits)
-                        new_student_id = f"{year_prefix}-{current_seq:05d}"
+                        new_student_id = f"{year_prefix}-{current_seq:06d}"
                         
                         student_obj, created = Student.objects.get_or_create(
                             name=name,
@@ -288,37 +288,41 @@ class QuizViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def save_results(self, request, pk=None):
         quiz = self.get_object()
-        results_data = request.data.get('results', []) 
+        results_data = request.data.get('results', [])
         
         saved_count = 0
         errors = []
 
         for item in results_data:
-            student_id_str = item.get('student_id')
+            sid_str = item.get('student_id')
             score = item.get('score')
+            answers = item.get('student_answers', {}) # <--- GET ANSWERS
 
-            # 1. Find Student
-            student = Student.objects.filter(student_id=student_id_str).first()
-            if not student:
-                errors.append(f"Student ID {student_id_str} not found.")
+            if not sid_str:
                 continue
 
-            # 2. Update or Create QuizResult
+            student = Student.objects.filter(student_id=sid_str).first()
+
+            if not student:
+                errors.append(f"Student ID '{sid_str}' not registered in the system.")
+                continue
+
+            # Save or Update
             QuizResult.objects.update_or_create(
                 quiz=quiz,
                 student=student,
                 defaults={
                     'score_obtained': score,
-                    # If your scanner eventually returns answers, map them here:
-                    # 'student_answers': item.get('answers', {}) 
+                    'student_answers': answers # <--- SAVE TO MODEL
                 }
             )
             saved_count += 1
         
-        # 3. Update Stats
+        # Update Stats (Optional but recommended)
         quiz.update_statistics()
 
         return Response({
-            "message": f"Saved {saved_count} results.", 
+            "status": "success",
+            "saved": saved_count,
             "errors": errors
         })
