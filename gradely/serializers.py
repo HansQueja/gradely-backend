@@ -112,8 +112,8 @@ class QuizResultSerializer(serializers.ModelSerializer):
         fields = ['id', 'student_name', 'student_id', 'score_obtained', 'date_taken']
 
 class QuizDetailSerializer(serializers.ModelSerializer):
-    # This ensures that when you fetch a single quiz, you get its results too
-    results = QuizResultSerializer(many=True, read_only=True)
+    results = serializers.SerializerMethodField() 
+    
     classroom_name = serializers.CharField(source='classroom.section_name', read_only=True)
     
     class Meta:
@@ -122,6 +122,35 @@ class QuizDetailSerializer(serializers.ModelSerializer):
             'id', 'title', 'total_score', 'mean_score', 
             'attendees_count', 'classroom_name', 'results', 'created_at'
         ]
+    
+    def get_results(self, obj):
+        all_students = obj.classroom.students.all().order_by('name') 
+        
+        existing_results = {res.student.id: res for res in obj.results.all()}
+        
+        data = []
+        for student in all_students:
+            result = existing_results.get(student.id)
+            
+            if result:
+                # Case A: Student has taken the quiz
+                data.append({
+                    "id": result.id,
+                    "student_name": student.name, 
+                    "student_id": student.student_id,
+                    "score_obtained": result.score_obtained,
+                    "date_taken": result.date_taken # Using the field from your model
+                })
+            else:
+                data.append({
+                    "id": f"temp-{student.id}",
+                    "student_name": student.name,
+                    "student_id": student.student_id,
+                    "score_obtained": None, 
+                    "date_taken": None
+                })
+        
+        return data
 
 # For auth, adding the role and id of the user
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
