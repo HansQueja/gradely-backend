@@ -270,6 +270,26 @@ class UploadStudentsView(APIView):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+class QuizViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = QuizSerializer
+
+    def get_queryset(self):
+        # Security: Only return quizzes belonging to classrooms where the user is the teacher
+        return Quiz.objects.filter(classroom__teacher=self.request.user).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        # Security Check: Ensure the teacher owns the classroom they are attaching the quiz to
+        classroom = serializer.validated_data['classroom']
+        if classroom.teacher != self.request.user:
+            raise serializers.ValidationError("You cannot create a quiz for a class you do not teach.")
+        serializer.save()
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return QuizDetailSerializer
+        return QuizSerializer
+
     @action(detail=True, methods=['post'])
     def save_results(self, request, pk=None):
         quiz = self.get_object()
