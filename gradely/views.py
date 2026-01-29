@@ -298,32 +298,32 @@ class QuizViewSet(viewsets.ModelViewSet):
         saved_count = 0
         errors = []
 
-        for item in results_data:
-            sid_str = item.get('student_id')
-            score = item.get('score')
-            answers = item.get('student_answers', {}) # <--- GET ANSWERS
+        with transaction.atomic(): 
+            for item in results_data:
+                sid_str = str(item.get('student_id')).strip()
+                score = item.get('score')
+                answers = item.get('student_answers', {})
 
-            if not sid_str:
-                continue
+                if not sid_str:
+                    continue
 
-            student = Student.objects.filter(student_id=sid_str).first()
+                student = Student.objects.filter(student_id=sid_str).first()
 
-            if not student:
-                errors.append(f"Student ID '{sid_str}' not registered in the system.")
-                continue
+                if not student:
+                    errors.append(f"Student ID '{sid_str}' not registered.")
+                    continue
 
-            # Save or Update
-            QuizResult.objects.update_or_create(
-                quiz=quiz,
-                student=student,
-                defaults={
-                    'score_obtained': score,
-                    'student_answers': answers # <--- SAVE TO MODEL
-                }
-            )
-            saved_count += 1
-        
-        # Update Stats (Optional but recommended)
+                QuizResult.objects.update_or_create(
+                    quiz=quiz,
+                    student=student,
+                    defaults={
+                        'score_obtained': score,
+                        'student_answers': answers
+                    }
+                )
+                saved_count += 1
+
+        # Update Stats once at the end
         quiz.update_statistics()
 
         return Response({
