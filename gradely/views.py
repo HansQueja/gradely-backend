@@ -54,6 +54,11 @@ class ApproveFacultyView(generics.UpdateAPIView):
     def patch(self, request, *args, **kwargs):
         return super().patch(request, *args, **kwargs)
 
+class RejectFacultyView(generics.DestroyAPIView):
+    queryset = User.objects.all()
+    permission_classes = [permissions.IsAdminUser]
+    lookup_field = 'pk'
+
 # To get the role on the passed token
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer

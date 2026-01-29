@@ -6,6 +6,7 @@ from .views import (
     FacultySignupView, 
     PendingFacultyListView, 
     ApproveFacultyView,
+    RejectFacultyView,
     TeacherDashboardView,
     SubjectViewSet,
     ClassroomViewSet,
@@ -47,4 +48,5 @@ urlpatterns = [
     # Admin only
     path('admin/pending/', PendingFacultyListView.as_view(), name='pending-list'),
     path('admin/approve/<int:pk>/', ApproveFacultyView.as_view(), name='approve-user'),
+    path('admin/reject/<int:pk>/', RejectFacultyView.as_view(), name='reject-user'),
 ]
