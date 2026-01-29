@@ -113,14 +113,15 @@ class QuizResultSerializer(serializers.ModelSerializer):
 
 class QuizDetailSerializer(serializers.ModelSerializer):
     results = serializers.SerializerMethodField() 
+    item_analysis = serializers.SerializerMethodField()
     
     classroom_name = serializers.CharField(source='classroom.section_name', read_only=True)
     
     class Meta:
         model = Quiz
         fields = [
-            'id', 'title', 'total_score', 'mean_score', 
-            'attendees_count', 'classroom_name', 'results', 'created_at'
+            'id', 'title', 'total_score', 'mean_score', 'min_score', 'max_score',
+            'attendees_count', 'classroom_name', 'results', 'item_analysis', 'created_at',
         ]
     
     def get_results(self, obj):
@@ -151,6 +152,50 @@ class QuizDetailSerializer(serializers.ModelSerializer):
                 })
         
         return data
+    
+    def get_item_analysis(self, obj):
+        """
+        Aggregates how many students got each question correct.
+        Returns: [ { "question": "1", "correct_count": 15, "difficulty": 75 }, ... ]
+        """
+        all_results = obj.results.all()
+        total_respondents = all_results.count()
+        
+        if total_respondents == 0:
+            return []
+
+        # Dictionary to hold counts: { "1": 0, "2": 5, "3": ... }
+        correct_counts = {}
+
+        for result in all_results:
+            answers = result.student_answers # This is the JSON dict
+            if not answers: continue
+            
+            for q_num, details in answers.items():
+                # Initialize if not exists
+                if q_num not in correct_counts:
+                    correct_counts[q_num] = 0
+                
+                # Check if correct (Handle boolean or string 'true')
+                if details.get('correct') is True:
+                    correct_counts[q_num] += 1
+
+        # Format data for Frontend
+        analysis_data = []
+        # Sort by question number (integers)
+        sorted_keys = sorted(correct_counts.keys(), key=lambda x: int(x) if x.isdigit() else x)
+        
+        for q_num in sorted_keys:
+            count = correct_counts[q_num]
+            percentage = round((count / total_respondents) * 100, 1)
+            analysis_data.append({
+                "question": q_num,
+                "correct_count": count,
+                "total_respondents": total_respondents,
+                "percentage": percentage
+            })
+            
+        return analysis_data
 
 # For auth, adding the role and id of the user
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
