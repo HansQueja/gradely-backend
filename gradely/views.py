@@ -10,6 +10,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from datetime import datetime
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import User, Classroom, Quiz, Subject, Student, QuizResult
 from .serializers import (
@@ -120,6 +121,10 @@ class SubjectViewSet(viewsets.ModelViewSet):
     queryset = Subject.objects.all().order_by('code')
     serializer_class = SubjectSerializer
     permission_classes = [IsAuthenticated]
+
+    # Enable filtering
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['grade_level']
 
 class ClassroomViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
