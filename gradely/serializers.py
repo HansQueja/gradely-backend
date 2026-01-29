@@ -41,7 +41,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subject
-        fields = ['id', 'name', 'code', 'description']
+        fields = ['id', 'name', 'code', 'description', 'grade_level']
 
 # For classrooms
 class ClassroomSerializer(serializers.ModelSerializer):
