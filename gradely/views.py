@@ -40,7 +40,11 @@ class FacultySignupView(generics.CreateAPIView):
 
 # Admin: Lists faculty users that are not approved
 class PendingFacultyListView(generics.ListAPIView):
-    queryset = User.objects.filter(role=User.Role.FACULTY, is_approved=False)
+    queryset = User.objects.filter(
+        is_approved=False, 
+        role__in=[User.Role.FACULTY, User.Role.ADMIN]
+    ).order_by('-date_joined')
+    
     serializer_class = UserApprovalSerializer
     permission_classes = [permissions.IsAdminUser]
 

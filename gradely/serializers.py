@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .models import User, Subject, Classroom, Quiz, QuizResult, Student
 
@@ -9,16 +10,17 @@ class FacultySignupSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['email', 'password', 'first_name', 'last_name']
+        fields = ['email', 'password', 'first_name', 'last_name', 'role']
 
     def create(self, validated_data):
+        role = validated_data.get('role', 'FACULTY')
         user = User.objects.create_user(
             username=validated_data['email'],
             email=validated_data['email'],
             password=validated_data['password'],
             first_name=validated_data.get('first_name', ''),
             last_name=validated_data.get('last_name', ''),
-            role=User.Role.FACULTY,
+            role=role,
             is_approved=False
         )
         return user
@@ -202,6 +204,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         # Get the standard token data (access/refresh)
         data = super().validate(attrs)
+
+        if not self.user.is_approved:
+            raise AuthenticationFailed("Your account is pending admin approval.")
 
         # Add extra data to the response
         data['role'] = self.user.role
