@@ -54,13 +54,13 @@ class PendingFacultyListView(generics.ListAPIView):
     ).order_by('-date_joined')
     
     serializer_class = UserApprovalSerializer
-    permission_classes = [permissions.isSchoolAdmin]
+    permission_classes = [isSchoolAdmin]
 
 # Admin: approve or reject faculty signups
 class ApproveFacultyView(generics.UpdateAPIView):
     queryset = User.objects.all()
     serializer_class = UserApprovalSerializer
-    permission_classes = [permissions.isSchoolAdmin]
+    permission_classes = [isSchoolAdmin]
     lookup_field = 'pk'
 
     # OCustom patch method to ensure they only toggle approval
@@ -69,7 +69,7 @@ class ApproveFacultyView(generics.UpdateAPIView):
 
 class RejectFacultyView(generics.DestroyAPIView):
     queryset = User.objects.all()
-    permission_classes = [permissions.isSchoolAdmin]
+    permission_classes = [isSchoolAdmin]
     lookup_field = 'pk'
 
 # To get the role on the passed token
