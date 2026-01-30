@@ -1,6 +1,6 @@
 from rest_framework import permissions
 
-class IsSchoolAdmin(permissions.BasePermission):
+class isSchoolAdmin(permissions.BasePermission):
     """
     Custom permission to only allow users with role='ADMIN'.
     """
