@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     CustomTokenObtainPairView,
+    AdminDashboardView,
     UserViewSet,
     CurrentUserView,
     FacultySignupView, 
@@ -48,6 +49,7 @@ urlpatterns = [
     path('auth/users/me/', CurrentUserView.as_view(), name='current-user'),
 
     # Admin only
+    path('admin/dashboard/', AdminDashboardView.as_view(), name='admin-dashboard'),
     path('admin/pending/', PendingFacultyListView.as_view(), name='pending-list'),
     path('admin/approve/<int:pk>/', ApproveFacultyView.as_view(), name='approve-user'),
     path('admin/reject/<int:pk>/', RejectFacultyView.as_view(), name='reject-user'),

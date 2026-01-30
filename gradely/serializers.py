@@ -48,6 +48,7 @@ class SubjectSerializer(serializers.ModelSerializer):
 # For classrooms
 class ClassroomSerializer(serializers.ModelSerializer):
     subject = SubjectSerializer(read_only=True)
+    teacher_name = serializers.SerializerMethodField()
 
     subject_id = serializers.PrimaryKeyRelatedField(
         queryset=Subject.objects.all(), 
@@ -55,11 +56,16 @@ class ClassroomSerializer(serializers.ModelSerializer):
         write_only=True
     )
 
-    student_count = serializers.IntegerField(source='students.count', read_only=True)
+    student_count = serializers.IntegerField(source='total_students', read_only=True)
 
     class Meta:
         model = Classroom
-        fields = ['id', 'section_name', 'school_year', 'subject', 'subject_id', 'student_count', 'created_at']
+        fields = ['id', 'section_name', 'school_year', 'subject', 'subject_id', 'student_count', 'created_at', 'teacher_name']
+
+    def get_teacher_name(self, obj):
+        if obj.teacher:
+            return obj.teacher.last_name
+        return "Unknown"
 
 class StudentSerializer(serializers.ModelSerializer):
     class Meta:

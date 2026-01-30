@@ -9,6 +9,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from datetime import datetime
 from django.db import transaction
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -39,8 +40,40 @@ class CurrentUserView(APIView):
         return Response(serializer.data)
 
 #====================================
-#     AUTH WORKS
+#     ADMIN WORKS
 #====================================
+class AdminDashboardView(APIView):
+    permission_classes = [isSchoolAdmin] # Ensure only Admins can see this
+
+    def get(self, request):
+        # 1. Basic Counts
+        total_students = Student.objects.count()
+        total_classes = Classroom.objects.count()
+        total_faculty = User.objects.filter(role=User.Role.FACULTY, is_approved=True).count()
+        pending_approvals = User.objects.filter(is_approved=False).count()
+
+        # 2. Subjects per Grade Level
+        subjects_distribution = Subject.objects.values('grade_level').annotate(
+            count=Count('id')
+        ).order_by('grade_level')
+
+        # 3. Quiz Statistics (Global View)
+        # Fetch recent quizzes with their stats
+        recent_quizzes = Quiz.objects.all().order_by('-created_at')[:10]
+        quiz_data = QuizSerializer(recent_quizzes, many=True).data
+
+        return Response({
+            "stats": {
+                "total_students": total_students,
+                "total_classes": total_classes,
+                "total_faculty": total_faculty,
+                "pending_approvals": pending_approvals,
+            },
+            "subjects_distribution": subjects_distribution,
+            "recent_quizzes": quiz_data
+        })
+
+
 class FacultySignupView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = FacultySignupSerializer
@@ -141,16 +174,26 @@ class SubjectViewSet(viewsets.ModelViewSet):
 class ClassroomViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
+    # Enable Filtering
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['subject__grade_level']
+
     def get_serializer_class(self):
-        # Use the Detailed serializer (with student list) for single items
         if self.action == 'retrieve':
             return ClassroomDetailSerializer
-        # Use the standard serializer (lighter, no student list) for the list view
         return ClassroomSerializer
 
     def get_queryset(self):
-        # Security: Only return classes where the logged-in user is the teacher
-        return Classroom.objects.filter(teacher=self.request.user).order_by('-created_at')
+        user = self.request.user
+
+        queryset = Classroom.objects.select_related('subject', 'teacher').annotate(
+            total_students=Count('students')
+        )
+
+        if user.role == 'ADMIN':
+            return queryset.order_by('-created_at')
+            
+        return queryset.filter(teacher=user).order_by('-created_at')
 
     def perform_create(self, serializer):
         # Automation: Automatically assign the logged-in user as the teacher
@@ -319,9 +362,20 @@ class QuizViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = QuizSerializer
 
+    # Enable filtering so we can fetch quizzes for a specific classroom
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['classroom']
+
     def get_queryset(self):
-        # Security: Only return quizzes belonging to classrooms where the user is the teacher
-        return Quiz.objects.filter(classroom__teacher=self.request.user).order_by('-created_at')
+        user = self.request.user
+
+        # Optimize: Fetch Classroom AND the Subject inside that Classroom
+        queryset = Quiz.objects.select_related('classroom', 'classroom__subject')
+
+        if user.role == 'ADMIN':
+            return queryset.order_by('-created_at')
+
+        return queryset.filter(classroom__teacher=user).order_by('-created_at')
 
     def perform_create(self, serializer):
         # Security Check: Ensure the teacher owns the classroom they are attaching the quiz to
