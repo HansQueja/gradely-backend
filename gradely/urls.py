@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CustomTokenObtainPairView,
     UserViewSet,
+    CurrentUserView,
     FacultySignupView, 
     PendingFacultyListView, 
     ApproveFacultyView,
@@ -44,6 +45,7 @@ urlpatterns = [
 
     # Helper APIs
     path('classrooms/<int:classroom_id>/upload-students/', UploadStudentsView.as_view(), name='upload-list'),
+    path('auth/users/me/', CurrentUserView.as_view(), name='current-user'),
 
     # Admin only
     path('admin/pending/', PendingFacultyListView.as_view(), name='pending-list'),

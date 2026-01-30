@@ -12,6 +12,7 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
+from .permissions import isSchoolAdmin
 from .models import User, Classroom, Quiz, Subject, Student, QuizResult
 from .serializers import (
     UserProfileSerializer,
@@ -30,6 +31,13 @@ from .serializers import (
 
 import pandas as pd
 
+class CurrentUserView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
+
 #====================================
 #     AUTH WORKS
 #====================================
@@ -46,13 +54,13 @@ class PendingFacultyListView(generics.ListAPIView):
     ).order_by('-date_joined')
     
     serializer_class = UserApprovalSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.isSchoolAdmin]
 
 # Admin: approve or reject faculty signups
 class ApproveFacultyView(generics.UpdateAPIView):
     queryset = User.objects.all()
     serializer_class = UserApprovalSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.isSchoolAdmin]
     lookup_field = 'pk'
 
     # OCustom patch method to ensure they only toggle approval
@@ -61,7 +69,7 @@ class ApproveFacultyView(generics.UpdateAPIView):
 
 class RejectFacultyView(generics.DestroyAPIView):
     queryset = User.objects.all()
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.isSchoolAdmin]
     lookup_field = 'pk'
 
 # To get the role on the passed token

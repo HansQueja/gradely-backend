@@ -30,7 +30,7 @@ class UserApprovalSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'email', 'first_name', 'last_name', 'role', 'is_approved', 'date_joined']
-        read_only_fields = ['email', 'role'] # Admin only changes is_approved
+        read_only_fields = ['email', 'role']
 
 # For user details
 class UserProfileSerializer(serializers.ModelSerializer):
