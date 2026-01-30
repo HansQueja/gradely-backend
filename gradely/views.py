@@ -206,7 +206,6 @@ class StudentViewSet(viewsets.ModelViewSet):
     queryset = Student.objects.all()
     serializer_class = StudentSerializer
 
-# Faculty: Uploading excel file of students
 class UploadStudentsView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -216,18 +215,38 @@ class UploadStudentsView(APIView):
         
         if serializer.is_valid():
             uploaded_file = request.FILES['file']
+            filename = uploaded_file.name.lower() # Normalize to lowercase for checking
             
             try:
-                # Fetch the classroom we are adding students to
+                # 1. Fetch Classroom
                 classroom = Classroom.objects.get(id=classroom_id, teacher=request.user)
 
-                df = pd.read_csv(uploaded_file)
+                # 2. CONDITIONAL PARSING: Check extension
+                if filename.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                elif filename.endswith(('.xls', '.xlsx')):
+                    # 'engine' is usually auto-detected, but explicit is safer
+                    df = pd.read_excel(uploaded_file) 
+                else:
+                    return Response(
+                        {"error": "Unsupported file format. Please upload .csv or .xlsx"}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # 3. Validation: Ensure 'name' column exists
+                # We normalize column names to lowercase to be forgiving (e.g. "Name" -> "name")
+                df.columns = df.columns.str.lower().str.strip()
+                
+                if 'name' not in df.columns:
+                    return Response(
+                        {"error": "File must contain a 'name' column."}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
 
                 # ======================================================
                 # AUTO-ID GENERATION LOGIC
                 # ======================================================
                 
-                # Get the current Year Prefix (e.g., "26")
                 year_prefix = datetime.now().strftime('%y')
                 
                 with transaction.atomic():
@@ -236,18 +255,26 @@ class UploadStudentsView(APIView):
                     ).order_by('-student_id').first()
 
                     if last_student:
-                        last_seq = int(last_student.student_id.split('-')[1])
+                        # Extract the number part safely
+                        try:
+                            last_seq = int(last_student.student_id.split('-')[1])
+                        except (IndexError, ValueError):
+                            last_seq = 0
                         current_seq = last_seq + 1
                     else:
                         current_seq = 1
 
                     students_to_create = []
                     
-                    # Iterate rows and assign IDs locally
                     for index, row in df.iterrows():
-                        name = str(row['name']).strip().title()
+                        # Skip empty rows
+                        raw_name = str(row['name']).strip()
+                        if not raw_name or raw_name.lower() == 'nan':
+                            continue
+
+                        name = raw_name.title()
                         
-                        # Format: "26" + "-" + "00001" (padded to 5 digits)
+                        # Generate ID: "26-000001"
                         new_student_id = f"{year_prefix}-{current_seq:06d}"
                         
                         student_obj, created = Student.objects.get_or_create(
@@ -261,17 +288,18 @@ class UploadStudentsView(APIView):
                         students_to_create.append(student_obj)
 
                     # Add everyone to the classroom
-                    classroom.students.add(*students_to_create)
+                    if students_to_create:
+                        classroom.students.add(*students_to_create)
                 
                 return Response({
                     "status": "success", 
-                    "message": "Students processed successfully"
+                    "message": f"Successfully processed {len(students_to_create)} students."
                 }, status=status.HTTP_200_OK)
 
             except Classroom.DoesNotExist:
                 return Response({"error": "Classroom not found"}, status=status.HTTP_404_NOT_FOUND)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": f"Error processing file: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
