@@ -10,6 +10,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from datetime import datetime
 from django.db import transaction
 from django.db.models import Count
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -31,6 +32,7 @@ from .serializers import (
 )
 
 import pandas as pd
+import csv
 
 class CurrentUserView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -435,3 +437,97 @@ class QuizViewSet(viewsets.ModelViewSet):
             "saved": saved_count,
             "errors": errors
         })
+    
+    @action(detail=True, methods=['get'])
+    def export_report(self, request, pk=None):
+        """
+        Exports a detailed CSV report for the quiz.
+        Structure:
+        - Quiz Title, Class, Date
+        - Statistics (Mean, Min, Max)
+        - [Blank Line]
+        - Item Analysis Header
+        - Q1, Q2, ... (Success Rate)
+        - [Blank Line]
+        - Student Results Header
+        - ID, Name, Score, Date Taken
+        """
+        quiz = self.get_object()
+        
+        # Create the HttpResponse object with the appropriate CSV header.
+        response = HttpResponse(content_type='text/csv')
+        filename = f"{quiz.title}_{quiz.classroom.section_name}_Report.csv".replace(' ', '_')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        writer = csv.writer(response)
+
+        # 1. QUIZ INFO & STATS
+        writer.writerow(['QUIZ REPORT', quiz.title])
+        writer.writerow(['Classroom', quiz.classroom.section_name])
+        writer.writerow(['Subject', quiz.classroom.subject.code])
+        writer.writerow(['Date Created', quiz.created_at.strftime('%Y-%m-%d')])
+        writer.writerow([])
+        
+        writer.writerow(['STATISTICS'])
+        writer.writerow(['Total Students', quiz.attendees_count])
+        writer.writerow(['Mean Score', round(quiz.mean_score, 2)])
+        writer.writerow(['Highest Score', quiz.max_score])
+        writer.writerow(['Lowest Score', quiz.min_score])
+        writer.writerow(['Perfect Score', quiz.total_score])
+        writer.writerow([])
+
+        # 2. ITEM ANALYSIS
+        # Calculate it manually or use the serializer logic if extracted to a helper
+        # For efficiency, we'll re-implement a lightweight version here:
+        all_results = quiz.results.all()
+        correct_counts = {}
+        total_respondents = all_results.count()
+
+        if total_respondents > 0:
+            for res in all_results:
+                answers = res.student_answers or {}
+                for q_num, details in answers.items():
+                    if q_num not in correct_counts: correct_counts[q_num] = 0
+                    if details.get('correct') is True: correct_counts[q_num] += 1
+            
+            # Sort keys
+            sorted_questions = sorted(correct_counts.keys(), key=lambda x: int(x) if x.isdigit() else x)
+            
+            writer.writerow(['ITEM ANALYSIS (Difficulty Index)'])
+            writer.writerow(['Question #', 'Correct Count', 'Success Rate (%)'])
+            
+            for q in sorted_questions:
+                count = correct_counts[q]
+                pct = round((count / total_respondents) * 100, 1)
+                writer.writerow([q, count, f"{pct}%"])
+            writer.writerow([])
+
+        # 3. STUDENT RESULTS
+        writer.writerow(['STUDENT RESULTS'])
+        writer.writerow(['Student ID', 'Name', 'Score', 'Percentage', 'Date Taken'])
+
+        # Get all students in the class (even those who haven't taken it)
+        all_students = quiz.classroom.students.all().order_by('name')
+        existing_results = {res.student.id: res for res in all_results}
+
+        for student in all_students:
+            result = existing_results.get(student.id)
+            if result:
+                pct = round((result.score_obtained / quiz.total_score) * 100, 1)
+                date_str = result.date_taken.strftime('%Y-%m-%d %H:%M')
+                writer.writerow([
+                    student.student_id, 
+                    student.name, 
+                    result.score_obtained, 
+                    f"{pct}%", 
+                    date_str
+                ])
+            else:
+                writer.writerow([
+                    student.student_id, 
+                    student.name, 
+                    "N/A", 
+                    "N/A", 
+                    "Not Taken"
+                ])
+
+        return response
