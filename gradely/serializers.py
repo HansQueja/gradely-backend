@@ -117,7 +117,7 @@ class QuizResultSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuizResult
-        fields = ['id', 'student_name', 'student_id', 'score_obtained', 'date_taken']
+        fields = ['id', 'student_name', 'student_id', 'score_obtained', 'scanned_image_url',  'date_taken']
 
 class QuizDetailSerializer(serializers.ModelSerializer):
     results = serializers.SerializerMethodField() 
