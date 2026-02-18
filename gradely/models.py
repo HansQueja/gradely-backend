@@ -126,6 +126,7 @@ class QuizResult(models.Model):
     
     score_obtained = models.DecimalField(max_digits=5, decimal_places=2)
     student_answers = models.JSONField(default=dict, blank=True)
+    scanned_image_url = models.URLField(max_length=500, null=True, blank=True)
     date_taken = models.DateTimeField(auto_now_add=True)
 
     class Meta:

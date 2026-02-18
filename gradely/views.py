@@ -410,6 +410,7 @@ class QuizViewSet(viewsets.ModelViewSet):
                 sid_str = str(item.get('student_id')).strip()
                 score = item.get('score')
                 answers = item.get('student_answers', {})
+                image_url = item.get('scanned_image_url')
 
                 if not sid_str:
                     continue
@@ -425,7 +426,8 @@ class QuizViewSet(viewsets.ModelViewSet):
                     student=student,
                     defaults={
                         'score_obtained': score,
-                        'student_answers': answers
+                        'student_answers': answers,
+                        'scanned_image_url': image_url
                     }
                 )
                 saved_count += 1
