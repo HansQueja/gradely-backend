@@ -21,36 +21,12 @@ Gradely is designed to streamline the grading workflow for educators. The backen
 
 The database is built on PostgreSQL (or standard SQLite for local dev) and utilizes Django's ORM.
 
-* **`User` (Custom)**
-* Extends the standard Django auth user.
-* Includes a `role` field (e.g., `TEACHER`, `ADMIN`) to dictate permission scopes across the API.
-
-
-* **`Subject`**
-* Represents academic courses (e.g., `code`, `name`, `grade_level`).
-
-
-* **`Classroom`**
-* The central hub of a teacher's workflow.
-* Links a `Subject` to a specific `Teacher` (User).
-* Contains metadata like `section_name` and `school_year`.
-
-
-* **`Student`**
-* Represents an enrolled student with a unique `student_id` and `name`.
-* Tied to Classrooms (allows for bulk importing via CSV/Excel).
-
-
-* **`Quiz`**
-* Linked to a specific `Classroom`.
-* Stores quiz metadata: `title`, `total_score`, and auto-calculated stats based on linked results.
-
-
-* **`QuizResult`**
-* The junction between a `Quiz` and a `Student`.
-* Stores the `score_obtained`, detailed `student_answers` (stored as JSON for item analysis), and the `scanned_image_url` linking to the visual proof of the graded OMR sheet on Supabase.
-
-
+* **`User` (Custom)**: Extends the standard Django auth user.
+* **`Subject`**: Represents academic courses (e.g., `code`, `name`, `grade_level`).
+* **`Classroom`**: The central hub of a teacher's workflow, linking a `Subject` to a specific `Teacher` (User).
+* **`Student`**: Represents an enrolled student with a unique `student_id` and `name`. Tied to Classrooms (allows for bulk importing via CSV/Excel).
+* **`Quiz`**: Linked to a specific `Classroom`. Stores quiz metadata: `title`, `total_score`, and auto-calculated stats based on linked results.
+* **`QuizResult`**: The junction between a `Quiz` and a `Student`. Stores the `score_obtained`, detailed `student_answers` (stored as JSON for item analysis), and the `scanned_image_url` linking to the visual proof of the graded OMR sheet on Supabase.
 
 ---
 
