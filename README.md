@@ -1,4 +1,4 @@
-# 🎓 Gradely Backend API
+# Gradely Backend API
 
 Welcome to the backend repository for **Gradely**, an automated grading and classroom management ecosystem.
 
@@ -17,7 +17,7 @@ Gradely is designed to streamline the grading workflow for educators. The backen
 
 ---
 
-## Core Models (Database Schema)
+## Core Models
 
 The database is built on PostgreSQL (or standard SQLite for local dev) and utilizes Django's ORM.
 
@@ -54,7 +54,7 @@ The database is built on PostgreSQL (or standard SQLite for local dev) and utili
 
 ---
 
-## 🔗 External Integrations
+## External Integrations
 
 While this is the main database API, it interacts with the following external services:
 
@@ -63,7 +63,7 @@ While this is the main database API, it interacts with the following external se
 
 ---
 
-## 🚀 Local Development Setup
+## Local Development Setup
 
 ### Prerequisites
 
