@@ -201,6 +201,20 @@ class ClassroomViewSet(viewsets.ModelViewSet):
         # Automation: Automatically assign the logged-in user as the teacher
         serializer.save(teacher=self.request.user)
 
+    @action(detail=False, methods=['get'])
+    def global_list(self, request):
+        """
+        Returns a list of ALL classrooms that have at least one student.
+        """
+        queryset = Classroom.objects.select_related('subject', 'teacher').annotate(
+            total_students=Count('students')
+        ).filter(
+            total_students__gt=0  # <--- NEW: Only show classes with students
+        ).order_by('subject__code', 'section_name')
+        
+        serializer = ClassroomSerializer(queryset, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'])
     def copy_list(self, request, pk=None):
         """
