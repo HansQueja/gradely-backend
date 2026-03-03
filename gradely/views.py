@@ -204,8 +204,7 @@ class ClassroomViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def copy_list(self, request, pk=None):
         """
-        Copy all students from a source classroom to this classroom.
-        Payload: { "source_classroom_id": 12 }
+        Copy all students from ANY existing classroom to this classroom.
         """
         target_classroom = self.get_object()
         source_id = request.data.get('source_classroom_id')
@@ -213,15 +212,16 @@ class ClassroomViewSet(viewsets.ModelViewSet):
         if not source_id:
             return Response({"error": "Source classroom ID required"}, status=400)
 
-        # Get the source classroom (ensure the teacher owns it too)
-        source_classroom = get_object_or_404(Classroom, id=source_id, teacher=request.user)
+        # This allows fetching students from any class in the system
+        source_classroom = get_object_or_404(Classroom, id=source_id)
 
-        # Bulk add students
         students_to_add = source_classroom.students.all()
         if not students_to_add.exists():
-             return Response({"error": "Source classroom has no students."}, status=400)
-             
-        target_classroom.students.add(*students_to_add)
+            return Response({"error": "Source classroom has no students."}, status=400)
+            
+        # Atomic transaction ensures all or nothing are added
+        with transaction.atomic():
+            target_classroom.students.add(*students_to_add)
 
         return Response({
             "message": f"Successfully copied {students_to_add.count()} students from {source_classroom.section_name}."
