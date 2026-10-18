@@ -209,3 +209,45 @@ class AccessControlTests(TestCase):
     def test_scanner_status(self, _):
         self.client.force_authenticate(self.t1)
         self.assertEqual(self.client.get("/gradely/scanner/status/").data, {"ready": False, "image_storage": None})
+
+
+class ResetDataCommandTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(username="admin@x.com", email="admin@x.com", password="pw",
+                                              role=User.Role.ADMIN, is_approved=True)
+        self.teacher = User.objects.create_user(username="t@x.com", email="t@x.com", password="pw",
+                                                role=User.Role.FACULTY, is_approved=True)
+        subject = Subject.objects.create(name="Math", code="M6", grade_level=6)
+        classroom = Classroom.objects.create(teacher=self.teacher, subject=subject, section_name="A", school_year="26")
+        student = Student.objects.create(name="Kid", student_id="260001")
+        classroom.students.add(student)
+        quiz = Quiz.objects.create(classroom=classroom, title="Q", total_score=5)
+        QuizResult.objects.create(quiz=quiz, student=student, score_obtained=3)
+
+    def run_command(self, *args):
+        from django.core.management import call_command
+        call_command("reset_data", *args, stdout=io.StringIO())
+
+    def test_dry_run_deletes_nothing(self):
+        self.run_command()
+        self.assertEqual(Student.objects.count(), 1)
+        self.assertEqual(User.objects.count(), 2)
+
+    def test_reset_keeps_only_admins(self):
+        self.run_command("--yes")
+        self.assertEqual(list(User.objects.values_list("email", flat=True)), ["admin@x.com"])
+        for model in (Student, Subject, Classroom, Quiz, QuizResult):
+            self.assertEqual(model.objects.count(), 0)
+        self.assertEqual(allocate_student_ids(1, year=2026), ["260001"])   # numbering restarts
+
+    def test_keep_flags(self):
+        self.run_command("--yes", "--keep-faculty", "--keep-subjects")
+        self.assertEqual(User.objects.count(), 2)
+        self.assertEqual(Subject.objects.count(), 1)
+        self.assertEqual(Student.objects.count(), 0)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    def test_refuses_without_an_admin(self):
+        self.admin.delete()
+        self.run_command("--yes")
+        self.assertEqual(Student.objects.count(), 1)
