@@ -87,7 +87,8 @@ DATABASES = {
     'default': dj_database_url.config(
         default=env('DATABASE_URI'),
         conn_max_age=600,
-        ssl_require=True
+        # Supabase requires SSL; set DB_SSL_REQUIRE=False for a local SQLite/Postgres.
+        ssl_require=env.bool('DB_SSL_REQUIRE', default=True)
     )
 }
 
@@ -161,3 +162,16 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+# ==========================================
+# 9. GRADELY SCANNER API
+# ==========================================
+# The FastAPI service that renders answer sheets and reads scanned photos.
+
+SCANNER_API_URL = env('SCANNER_API_URL', default='https://azcreas-gradely-scanner-api.hf.space').rstrip('/')
+SCANNER_API_KEY = env('SCANNER_API_KEY', default='')
+SCANNER_TIMEOUT = env.int('SCANNER_TIMEOUT', default=120)  # seconds per request
+
+# Photos of answer sheets are uploaded through Django to the scanner.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024

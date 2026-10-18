@@ -74,33 +74,43 @@ class StudentSerializer(serializers.ModelSerializer):
 
 # A detailed view that shows the students inside
 class ClassroomDetailSerializer(ClassroomSerializer):
-    students = StudentSerializer(many=True, read_only=True)
+    students = serializers.SerializerMethodField()
 
     class Meta(ClassroomSerializer.Meta):
         fields = ClassroomSerializer.Meta.fields + ['students']
 
     def get_students(self, obj):
-        return [
-            {
-                "id": s.id, 
-                "student_id": s.student_id, 
-                "name": f"{s.name}"
-            } 
-            for s in obj.students.all().order_by('student_id')
-        ]
+        return StudentSerializer(obj.students.order_by('name'), many=True).data
 
 # For quizzes
 class QuizSerializer(serializers.ModelSerializer):
     classroom_name = serializers.CharField(source='classroom.section_name', read_only=True)
     subject_code = serializers.CharField(source='classroom.subject.code', read_only=True)
+    has_answer_key = serializers.SerializerMethodField()
 
     class Meta:
         model = Quiz
         fields = [
             'id', 'title', 'total_score', 'created_at', 'classroom', 
             'classroom_name', 'subject_code',
-            'mean_score', 'max_score', 'min_score', 'attendees_count'
+            'mean_score', 'max_score', 'min_score', 'attendees_count',
+            'has_answer_key',
         ]
+
+    def get_has_answer_key(self, obj):
+        return len(obj.answer_key or {}) == obj.total_score
+
+    def validate_classroom(self, classroom):
+        user = self.context['request'].user
+        if user.role != User.Role.ADMIN and classroom.teacher_id != user.id:
+            raise serializers.ValidationError("You can only add quizzes to your own classes.")
+        return classroom
+
+    def validate_total_score(self, value):
+        if self.instance and value != self.instance.total_score and self.instance.results.exists():
+            raise serializers.ValidationError(
+                "This quiz already has saved results, so its number of items can't change.")
+        return value
 
 # For uploading students
 class StudentUploadSerializer(serializers.Serializer):
@@ -117,11 +127,12 @@ class QuizResultSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuizResult
-        fields = ['id', 'student_name', 'student_id', 'score_obtained', 'scanned_image_url',  'date_taken']
+        fields = ['id', 'student_name', 'student_id', 'score_obtained', 'student_answers', 'scanned_image_url', 'date_taken']
 
 class QuizDetailSerializer(serializers.ModelSerializer):
     results = serializers.SerializerMethodField() 
     item_analysis = serializers.SerializerMethodField()
+    has_answer_key = serializers.SerializerMethodField()
     
     classroom_name = serializers.CharField(source='classroom.section_name', read_only=True)
     
@@ -129,13 +140,17 @@ class QuizDetailSerializer(serializers.ModelSerializer):
         model = Quiz
         fields = [
             'id', 'title', 'total_score', 'mean_score', 'min_score', 'max_score',
-            'attendees_count', 'classroom_name', 'results', 'item_analysis', 'created_at',
+            'attendees_count', 'classroom', 'classroom_name', 'results', 'item_analysis', 'created_at',
+            'answer_key', 'has_answer_key',
         ]
+
+    def get_has_answer_key(self, obj):
+        return len(obj.answer_key or {}) == obj.total_score
     
     def get_results(self, obj):
         all_students = obj.classroom.students.all().order_by('name') 
         
-        existing_results = {res.student.id: res for res in obj.results.all()}
+        existing_results = {res.student_id: res for res in obj.results.all()}
         
         data = []
         for student in all_students:
@@ -148,7 +163,9 @@ class QuizDetailSerializer(serializers.ModelSerializer):
                     "student_name": student.name, 
                     "student_id": student.student_id,
                     "score_obtained": result.score_obtained,
-                    "date_taken": result.date_taken # Using the field from your model
+                    "student_answers": result.student_answers,
+                    "scanned_image_url": result.scanned_image_url,
+                    "date_taken": result.date_taken
                 })
             else:
                 data.append({
@@ -156,6 +173,8 @@ class QuizDetailSerializer(serializers.ModelSerializer):
                     "student_name": student.name,
                     "student_id": student.student_id,
                     "score_obtained": None, 
+                    "student_answers": None,
+                    "scanned_image_url": None,
                     "date_taken": None
                 })
         

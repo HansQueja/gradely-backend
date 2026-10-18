@@ -14,6 +14,7 @@ from .views import (
     ClassroomViewSet,
     StudentViewSet,
     QuizViewSet,
+    ScannerStatusView,
     UploadStudentsView
 )
 
@@ -47,6 +48,7 @@ urlpatterns = [
     # Helper APIs
     path('classrooms/<int:classroom_id>/upload-students/', UploadStudentsView.as_view(), name='upload-list'),
     path('auth/users/me/', CurrentUserView.as_view(), name='current-user'),
+    path('scanner/status/', ScannerStatusView.as_view(), name='scanner-status'),
 
     # Admin only
     path('admin/dashboard/', AdminDashboardView.as_view(), name='admin-dashboard'),

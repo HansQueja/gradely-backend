@@ -1,3 +1,4 @@
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 
@@ -26,7 +27,12 @@ class User(AbstractUser):
 # ==========================================
 
 class Student(models.Model):
-    student_id = models.CharField(max_length=20, unique=True)
+    # YYNNNN: registration year + sequence (see student_ids.py). Shaded on the answer sheet.
+    student_id = models.CharField(
+        max_length=20,
+        unique=True,
+        validators=[RegexValidator(r"^\d{6}$", "Student ID must be 6 digits (YYNNNN, e.g. 260001).")],
+    )
     name = models.CharField(max_length=100)
     
     def __str__(self):
@@ -86,8 +92,13 @@ class Classroom(models.Model):
 class Quiz(models.Model):
     classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name='quizzes')
     title = models.CharField(max_length=200)
-    total_score = models.IntegerField(default=100)
-    
+    # Number of items on the answer sheet; every item is worth 1 point.
+    total_score = models.IntegerField(
+        default=50,
+        validators=[MinValueValidator(1), MaxValueValidator(100)],
+    )
+
+    # {"1": "A", "2": "C", ...}, set by the teacher before scanning (see answer_keys.py)
     answer_key = models.JSONField(default=dict, blank=True)
 
     # Item Analysis / Statistics Cache
@@ -133,4 +144,4 @@ class QuizResult(models.Model):
         unique_together = ['quiz', 'student']
 
     def __str__(self):
-        return f"{self.student.last_name} - {self.quiz.title}: {self.score_obtained}"
+        return f"{self.student.name} - {self.quiz.title}: {self.score_obtained}"

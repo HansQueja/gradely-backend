@@ -1,4 +1,4 @@
-from rest_framework import generics, permissions, viewsets, serializers
+from rest_framework import generics, mixins, permissions, viewsets
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.views import APIView
@@ -7,14 +7,15 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.decorators import action
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from datetime import datetime
 from django.db import transaction
 from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
+from . import answer_keys, scanner_client
 from .permissions import isSchoolAdmin
+from .student_ids import allocate_student_ids
 from .models import User, Classroom, Quiz, Subject, Student, QuizResult
 from .serializers import (
     UserProfileSerializer,
@@ -125,9 +126,10 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Optimization: You might want to restrict this so users can only see themselves
-        # But for now, returning all is fine for internal logic
-        return User.objects.all()
+        # Admins can look anyone up; everyone else only sees their own account.
+        if self.request.user.role == User.Role.ADMIN:
+            return User.objects.all()
+        return User.objects.filter(id=self.request.user.id)
 
 #====================================
 #     FACULTY PAGES
@@ -139,19 +141,18 @@ class TeacherDashboardView(APIView):
     def get(self, request):
         user = request.user
         
-        classrooms = Classroom.objects.filter(teacher=user).select_related('subject')
-        
-        quizzes = Quiz.objects.filter(classroom__teacher=user).order_by('-created_at')[:5]
-
-        total_students = set()
-        for c in classrooms:
-            for s in c.students.all():
-                total_students.add(s.id)
+        classrooms = (Classroom.objects.filter(teacher=user)
+                      .select_related('subject', 'teacher')
+                      .annotate(total_students=Count('students'))
+                      .order_by('-created_at'))
+        quizzes = (Quiz.objects.filter(classroom__teacher=user)
+                   .select_related('classroom', 'classroom__subject')
+                   .order_by('-created_at')[:5])
 
         return Response({
             "classes": ClassroomSerializer(classrooms, many=True).data,
             "recent_quizzes": QuizSerializer(quizzes, many=True).data,
-            "total_students": len(total_students),
+            "total_students": Student.objects.filter(classrooms__teacher=user).distinct().count(),
             "total_classes": classrooms.count()
         })
     
@@ -273,9 +274,22 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-class StudentViewSet(viewsets.ModelViewSet):
+class StudentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
+                     viewsets.GenericViewSet):
+    """
+    Students are created by roster import and removed from a class with
+    ClassroomViewSet.remove_student, so this only lists and edits them.
+    Teachers see only students enrolled in their own classes.
+    """
     queryset = Student.objects.all()
     serializer_class = StudentSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = Student.objects.order_by('name')
+        if user.role == User.Role.ADMIN:
+            return queryset
+        return queryset.filter(classrooms__teacher=user).distinct()
 
 class UploadStudentsView(APIView):
     permission_classes = [IsAuthenticated]
@@ -314,57 +328,35 @@ class UploadStudentsView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # ======================================================
-                # AUTO-ID GENERATION LOGIC
-                # ======================================================
-                
-                year_prefix = datetime.now().strftime('%y')
-                
+                # Existing students (matched by name) keep their ID; new ones get
+                # the next YYNNNN IDs for this year (see student_ids.py).
+                names = []
+                for raw in df['name']:
+                    name = str(raw).strip()
+                    if name and name.lower() != 'nan':
+                        names.append(name.title())
+                names = list(dict.fromkeys(names))  # de-duplicate, keep order
+
                 with transaction.atomic():
-                    last_student = Student.objects.filter(
-                        student_id__startswith=f"{year_prefix}-"
-                    ).order_by('-student_id').first()
+                    existing = {s.name: s for s in Student.objects.filter(name__in=names)}
+                    new_names = [n for n in names if n not in existing]
+                    try:
+                        new_ids = allocate_student_ids(len(new_names))
+                    except ValueError as e:
+                        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-                    if last_student:
-                        # Extract the number part safely
-                        try:
-                            last_seq = int(last_student.student_id.split('-')[1])
-                        except (IndexError, ValueError):
-                            last_seq = 0
-                        current_seq = last_seq + 1
-                    else:
-                        current_seq = 1
+                    created = Student.objects.bulk_create(
+                        [Student(name=n, student_id=sid) for n, sid in zip(new_names, new_ids)]
+                    )
+                    students_to_create = list(existing.values()) + created
 
-                    students_to_create = []
-                    
-                    for index, row in df.iterrows():
-                        # Skip empty rows
-                        raw_name = str(row['name']).strip()
-                        if not raw_name or raw_name.lower() == 'nan':
-                            continue
-
-                        name = raw_name.title()
-                        
-                        # Generate ID: "26-000001"
-                        new_student_id = f"{year_prefix}-{current_seq:06d}"
-                        
-                        student_obj, created = Student.objects.get_or_create(
-                            name=name,
-                            defaults={'student_id': new_student_id}
-                        )
-                    
-                        if created:
-                            current_seq += 1
-
-                        students_to_create.append(student_obj)
-
-                    # Add everyone to the classroom
                     if students_to_create:
                         classroom.students.add(*students_to_create)
                 
                 return Response({
-                    "status": "success", 
-                    "message": f"Successfully processed {len(students_to_create)} students."
+                    "status": "success",
+                    "message": f"Successfully processed {len(students_to_create)} students "
+                               f"({len(created)} new)."
                 }, status=status.HTTP_200_OK)
 
             except Classroom.DoesNotExist:
@@ -373,6 +365,44 @@ class UploadStudentsView(APIView):
                 return Response({"error": f"Error processing file: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class ScannerStatusView(APIView):
+    """GET: is the scanner service awake? The frontend polls this before scanning."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(scanner_client.health())
+
+
+def _grade_answers(student_answers, key):
+    """
+    student_answers: {"1": {"selected": "A", ...}} as returned by the scanner (possibly edited).
+    Returns (score, answers) where every item of the key has selected/key/correct/needs_review.
+    """
+    score = 0
+    graded = {}
+    for item, correct_answer in key.items():
+        entry = student_answers.get(item) or {}
+        selected = str(entry.get('selected') or '-').strip().upper()
+        is_correct = selected == correct_answer
+        score += is_correct
+        graded[item] = {
+            "selected": selected,
+            "key": correct_answer,
+            "correct": is_correct,
+            "needs_review": bool(entry.get('needs_review', False)),
+        }
+    return score, graded
+
+
+def _regrade_results(quiz):
+    """Re-scores saved results after the answer key changes. Returns how many were updated."""
+    results = list(quiz.results.all())
+    for result in results:
+        result.score_obtained, result.student_answers = _grade_answers(result.student_answers or {}, quiz.answer_key)
+    QuizResult.objects.bulk_update(results, ['score_obtained', 'student_answers'])
+    return len(results)
+
 
 class QuizViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
@@ -393,55 +423,140 @@ class QuizViewSet(viewsets.ModelViewSet):
 
         return queryset.filter(classroom__teacher=user).order_by('-created_at')
 
-    def perform_create(self, serializer):
-        # Security Check: Ensure the teacher owns the classroom they are attaching the quiz to
-        classroom = serializer.validated_data['classroom']
-        if classroom.teacher != self.request.user:
-            raise serializers.ValidationError("You cannot create a quiz for a class you do not teach.")
-        serializer.save()
-
     def get_serializer_class(self):
         if self.action == 'retrieve':
             return QuizDetailSerializer
         return QuizSerializer
 
+    # ------------------------------------------------------------------
+    # Scanning workflow:
+    #   1. PUT  answer_key/    teacher sets the key (CSV/Excel upload or JSON)
+    #   2. GET  answer_sheet/  printable PDF from the scanner, pre-filled with quiz info
+    #   3. POST scan/          photos -> scanner -> results matched to the class roster
+    #   4. POST save_results/  teacher-reviewed results are graded and stored
+    # ------------------------------------------------------------------
+
+    @action(detail=True, methods=['get', 'put'], url_path='answer_key')
+    def answer_key(self, request, pk=None):
+        quiz = self.get_object()
+
+        if request.method == 'PUT':
+            try:
+                if 'file' in request.FILES:
+                    key = answer_keys.parse_file(request.FILES['file'], quiz.total_score)
+                else:
+                    key = answer_keys.normalize(request.data.get('answer_key'), quiz.total_score)
+            except answer_keys.AnswerKeyError as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                quiz.answer_key = key
+                quiz.save(update_fields=['answer_key'])
+                regraded = _regrade_results(quiz)
+            quiz.update_statistics()
+            return Response({"answer_key": key, "num_items": quiz.total_score, "regraded_results": regraded})
+
+        return Response({
+            "answer_key": quiz.answer_key,
+            "num_items": quiz.total_score,
+            "complete": len(quiz.answer_key or {}) == quiz.total_score,
+        })
+
+    @action(detail=True, methods=['get'])
+    def answer_sheet(self, request, pk=None):
+        quiz = self.get_object()
+        classroom = quiz.classroom
+        teacher = classroom.teacher
+        try:
+            pdf = scanner_client.generate_answer_sheet(
+                num_items=quiz.total_score,
+                title=quiz.title,
+                subject=classroom.subject.name,
+                teacher=f"{teacher.first_name} {teacher.last_name}".strip(),
+                grade_section=f"{classroom.subject.get_grade_level_display()} - {classroom.section_name}",
+            )
+        except scanner_client.ScannerError as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        response = HttpResponse(pdf, content_type='application/pdf')
+        filename = f"{quiz.title}_answer_sheet.pdf".replace(' ', '_')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def scan(self, request, pk=None):
+        """
+        Sends photos to the scanner and returns its results without saving them,
+        so the teacher can review (and fix) them first. Each sheet gets a
+        `student` entry when its shaded ID matches someone in this class.
+        """
+        quiz = self.get_object()
+        files = request.FILES.getlist('files')
+        if not files:
+            return Response({"error": "Upload at least one photo."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(quiz.answer_key or {}) != quiz.total_score:
+            return Response({"error": "Set the complete answer key before scanning."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            data = scanner_client.scan_sheets(files, quiz.answer_key)
+        except scanner_client.ScannerError as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        roster = {s.student_id: s for s in quiz.classroom.students.all()}
+        saved_ids = set(quiz.results.values_list('student_id', flat=True))
+        for result in data.get('results', []):
+            if 'error' in result:
+                continue
+            student = roster.get(result.get('student_id'))
+            result['student'] = (
+                {"id": student.id, "student_id": student.student_id, "name": student.name}
+                if student else None
+            )
+            result['already_saved'] = bool(student and student.id in saved_ids)
+            if not student:
+                result.setdefault('warnings', []).append(
+                    f"ID {result.get('student_id')} is not in this class. Choose the student manually."
+                )
+        return Response(data)
+
     @action(detail=True, methods=['post'])
     def save_results(self, request, pk=None):
+        """
+        Payload: {"results": [{"student_id": "260001", "student_answers": {...}, "scanned_image_url": "..."}]}
+        Scores are always recomputed here from the stored answer key, so a teacher's
+        corrections to `selected` during review are graded consistently.
+        """
         quiz = self.get_object()
         results_data = request.data.get('results', [])
-        
+        key = quiz.answer_key or {}
+        if len(key) != quiz.total_score:
+            return Response({"error": "Set the complete answer key before saving results."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        roster = {s.student_id: s for s in quiz.classroom.students.all()}
         saved_count = 0
         errors = []
 
-        incoming_ids = {str(item.get('student_id')).strip() for item in results_data if item.get('student_id')}
-
-        students_queryset = Student.objects.filter(student_id__in=incoming_ids)
-        
-        student_map = {s.student_id: s for s in students_queryset}
-
-        with transaction.atomic(): 
+        with transaction.atomic():
             for item in results_data:
-                sid_str = str(item.get('student_id')).strip()
-                score = item.get('score')
-                answers = item.get('student_answers', {})
-                image_url = item.get('scanned_image_url')
-
-                if not sid_str:
+                sid = str(item.get('student_id') or '').strip()
+                if not sid:
+                    errors.append("A result has no student ID.")
                     continue
-
-                student = student_map.get(sid_str)
-
+                student = roster.get(sid)
                 if not student:
-                    errors.append(f"Student ID '{sid_str}' not registered.")
+                    errors.append(f"Student ID '{sid}' is not enrolled in this class.")
                     continue
 
+                score, answers = _grade_answers(item.get('student_answers') or {}, key)
                 QuizResult.objects.update_or_create(
                     quiz=quiz,
                     student=student,
                     defaults={
                         'score_obtained': score,
                         'student_answers': answers,
-                        'scanned_image_url': image_url
+                        'scanned_image_url': item.get('scanned_image_url'),
                     }
                 )
                 saved_count += 1
