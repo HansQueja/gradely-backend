@@ -251,3 +251,45 @@ class ResetDataCommandTests(TestCase):
         self.admin.delete()
         self.run_command("--yes")
         self.assertEqual(Student.objects.count(), 1)
+
+
+class EmailCaseTests(TestCase):
+    """Phones capitalize the first letter of the email field; that must not block login."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_signup_lowercases_and_login_ignores_case(self):
+        res = self.client.post("/gradely/signup/", {"email": " Sheng@School.ph ", "password": "Teach1234!",
+                                                     "first_name": "S", "last_name": "P", "role": "FACULTY"},
+                               format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        user = User.objects.get()
+        self.assertEqual(user.email, "sheng@school.ph")
+        user.is_approved = True
+        user.save()
+        for typed in ("sheng@school.ph", "Sheng@school.ph", "SHENG@SCHOOL.PH"):
+            res = self.client.post("/gradely/login/", {"email": typed, "password": "Teach1234!"}, format="json")
+            self.assertEqual(res.status_code, 200, (typed, res.data))
+            self.assertEqual(res.data["role"], "FACULTY")
+
+    def test_existing_mixed_case_account_can_log_in_lowercase(self):
+        User.objects.create_user(username="Ana@x.com", email="Ana@x.com", password="pw12345!",
+                                 role=User.Role.FACULTY, is_approved=True)
+        res = self.client.post("/gradely/login/", {"email": "ana@x.com", "password": "pw12345!"}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+
+    def test_duplicate_differing_by_case_rejected(self):
+        User.objects.create_user(username="ana@x.com", email="ana@x.com", password="pw", role=User.Role.FACULTY)
+        res = self.client.post("/gradely/signup/", {"email": "ANA@x.com", "password": "Teach1234!",
+                                                     "first_name": "A", "last_name": "B", "role": "FACULTY"},
+                               format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("already exists", str(res.data))
+
+    def test_unapproved_still_blocked(self):
+        User.objects.create_user(username="new@x.com", email="new@x.com", password="pw12345!",
+                                 role=User.Role.FACULTY, is_approved=False)
+        res = self.client.post("/gradely/login/", {"email": "NEW@x.com", "password": "pw12345!"}, format="json")
+        self.assertEqual(res.status_code, 401)
+        self.assertIn("pending admin approval", str(res.data))

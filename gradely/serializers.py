@@ -12,6 +12,12 @@ class FacultySignupSerializer(serializers.ModelSerializer):
         model = User
         fields = ['email', 'password', 'first_name', 'last_name', 'role']
 
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return email
+
     def create(self, validated_data):
         role = validated_data.get('role', 'FACULTY')
         user = User.objects.create_user(

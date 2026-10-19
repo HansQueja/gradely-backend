@@ -1,12 +1,21 @@
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
-from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.models import AbstractUser, UserManager
 
 # ==========================================
 # 1. AUTHENTICATION
 # ==========================================
+class CaseInsensitiveUserManager(UserManager):
+    # Login looks users up by email. Phones often capitalize the first letter
+    # ("Ana@school.ph"), so match emails regardless of case.
+    def get_by_natural_key(self, email):
+        return self.get(email__iexact=email)
+
+
 class User(AbstractUser):
-    email = models.EmailField(unique=True)
+    email = models.EmailField(unique=True)  # stored lowercase (see FacultySignupSerializer)
+
+    objects = CaseInsensitiveUserManager()
     
     class Role(models.TextChoices):
         ADMIN = "ADMIN", "Admin"
