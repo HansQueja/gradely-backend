@@ -1,3 +1,5 @@
+from django.contrib.auth.password_validation import validate_password
+from django.db.models import Count
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -233,6 +235,12 @@ class QuizDetailSerializer(serializers.ModelSerializer):
 # For auth, adding the role and id of the user
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
+        # A deactivated account fails authentication like a wrong password would.
+        # Explain why, but only once the password is proven correct.
+        user = User.objects.filter(email__iexact=attrs.get(self.username_field, '')).first()
+        if user and not user.is_active and user.check_password(attrs.get('password', '')):
+            raise AuthenticationFailed("Your account has been deactivated. Please contact an administrator.")
+
         # Get the standard token data (access/refresh)
         data = super().validate(attrs)
 
@@ -244,3 +252,90 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['id'] = self.user.id
         
         return data
+
+# ==========================================
+# ADMIN: FACULTY MANAGEMENT
+# ==========================================
+class FacultyAdminSerializer(serializers.ModelSerializer):
+    """Faculty accounts as seen (and edited) by admins. Counts come from queryset annotations."""
+    password = serializers.CharField(write_only=True, required=False, min_length=8)
+    class_count = serializers.IntegerField(read_only=True, default=0)
+    student_count = serializers.IntegerField(read_only=True, default=0)
+    quiz_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'password',
+            'is_approved', 'is_active', 'date_joined', 'last_login',
+            'class_count', 'student_count', 'quiz_count',
+        ]
+        read_only_fields = ['date_joined', 'last_login']
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        others = User.objects.filter(email__iexact=email)
+        if self.instance:
+            others = others.exclude(id=self.instance.id)
+        if others.exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return email
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
+
+    def validate(self, attrs):
+        if not self.instance and not attrs.get('password'):
+            raise serializers.ValidationError({"password": "A password is required for a new account."})
+        return attrs
+
+    def create(self, validated_data):
+        # Accounts created by an admin are trusted, so they start approved.
+        validated_data.setdefault('is_approved', True)
+        return User.objects.create_user(
+            username=validated_data['email'],
+            role=User.Role.FACULTY,
+            **validated_data,
+        )
+
+    def update(self, instance, validated_data):
+        validated_data.pop('password', None)  # passwords change only through set_password
+        new_email = validated_data.get('email')
+        if new_email and instance.username == instance.email:
+            instance.username = new_email   # keep the username mirroring the email
+        return super().update(instance, validated_data)
+
+
+class FacultyAdminDetailSerializer(FacultyAdminSerializer):
+    classes = serializers.SerializerMethodField()
+
+    class Meta(FacultyAdminSerializer.Meta):
+        fields = FacultyAdminSerializer.Meta.fields + ['classes']
+
+    def get_classes(self, obj):
+        classrooms = (Classroom.objects.filter(teacher=obj)
+                      .select_related('subject')
+                      .annotate(total_students=Count('students', distinct=True),
+                                total_quizzes=Count('quizzes', distinct=True))
+                      .order_by('subject__code', 'section_name'))
+        return [
+            {
+                "id": c.id,
+                "subject_code": c.subject.code,
+                "subject_name": c.subject.name,
+                "section_name": c.section_name,
+                "school_year": c.school_year,
+                "student_count": c.total_students,
+                "quiz_count": c.total_quizzes,
+            }
+            for c in classrooms
+        ]
+
+
+class SetPasswordSerializer(serializers.Serializer):
+    password = serializers.CharField(min_length=8, write_only=True)
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value

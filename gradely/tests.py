@@ -293,3 +293,82 @@ class EmailCaseTests(TestCase):
         res = self.client.post("/gradely/login/", {"email": "NEW@x.com", "password": "pw12345!"}, format="json")
         self.assertEqual(res.status_code, 401)
         self.assertIn("pending admin approval", str(res.data))
+
+
+class AdminFacultyTests(TestCase):
+    """Only admins can see and manage faculty accounts; admin accounts are never touched."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username="admin@x.com", email="admin@x.com", password="pw",
+                                              role=User.Role.ADMIN, is_approved=True)
+        self.teacher = User.objects.create_user(username="t@x.com", email="t@x.com", password="Teach1234!",
+                                                first_name="Ana", last_name="Santos",
+                                                role=User.Role.FACULTY, is_approved=True)
+        subject = Subject.objects.create(name="Math", code="M6", grade_level=6)
+        self.classroom = Classroom.objects.create(teacher=self.teacher, subject=subject, section_name="A", school_year="26")
+        self.kid = Student.objects.create(name="Kid", student_id="260001")
+        self.classroom.students.add(self.kid)
+        self.quiz = Quiz.objects.create(classroom=self.classroom, title="Q", total_score=5)
+        QuizResult.objects.create(quiz=self.quiz, student=self.kid, score_obtained=3)
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+        self.url = "/gradely/admin/faculty/"
+
+    def test_faculty_cannot_use_it(self):
+        self.client.force_authenticate(self.teacher)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+        self.assertEqual(self.client.delete(f"{self.url}{self.teacher.id}/").status_code, 403)
+
+    def test_list_and_detail_with_counts(self):
+        rows = self.client.get(self.url).data
+        self.assertEqual([r["email"] for r in rows], ["t@x.com"])             # admins not listed
+        self.assertEqual((rows[0]["class_count"], rows[0]["student_count"], rows[0]["quiz_count"]), (1, 1, 1))
+        detail = self.client.get(f"{self.url}{self.teacher.id}/").data
+        self.assertEqual(detail["classes"][0]["section_name"], "A")
+        self.assertEqual(self.client.get(f"{self.url}{self.admin.id}/").status_code, 404)
+
+    def test_create_edit_and_password(self):
+        res = self.client.post(self.url, {"email": "New@X.com", "first_name": "N", "last_name": "T",
+                                          "password": "Fresh-pass-2026"}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        new = User.objects.get(email="new@x.com")
+        self.assertTrue(new.is_approved)
+        self.assertEqual(new.role, User.Role.FACULTY)
+        self.assertNotIn("password", res.data)
+
+        self.assertEqual(self.client.post(self.url, {"email": "t@X.com", "password": "Fresh-pass-2026"},
+                                          format="json").status_code, 400)          # duplicate email
+        self.assertEqual(self.client.post(self.url, {"email": "x@x.com"}, format="json").status_code, 400)
+
+        res = self.client.patch(f"{self.url}{new.id}/", {"email": "renamed@x.com", "last_name": "Cruz"}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        new.refresh_from_db()
+        self.assertEqual((new.email, new.username, new.last_name), ("renamed@x.com", "renamed@x.com", "Cruz"))
+
+        self.assertEqual(self.client.post(f"{self.url}{new.id}/set_password/", {"password": "123"},
+                                          format="json").status_code, 400)
+        self.assertEqual(self.client.post(f"{self.url}{new.id}/set_password/", {"password": "Another-pass-99"},
+                                          format="json").status_code, 200)
+        login = APIClient().post("/gradely/login/", {"email": "renamed@x.com", "password": "Another-pass-99"}, format="json")
+        self.assertEqual(login.status_code, 200)
+
+    def test_deactivate_blocks_login_with_clear_message(self):
+        self.client.patch(f"{self.url}{self.teacher.id}/", {"is_active": False}, format="json")
+        res = APIClient().post("/gradely/login/", {"email": "t@x.com", "password": "Teach1234!"}, format="json")
+        self.assertEqual(res.status_code, 401)
+        self.assertIn("deactivated", str(res.data))
+        wrong = APIClient().post("/gradely/login/", {"email": "t@x.com", "password": "nope"}, format="json")
+        self.assertNotIn("deactivated", str(wrong.data))                      # no hint without the password
+        self.assertEqual(self.client.get(self.url, {"is_active": "false"}).data[0]["email"], "t@x.com")
+
+    def test_delete_removes_their_classes_but_keeps_students(self):
+        res = self.client.delete(f"{self.url}{self.teacher.id}/")
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(User.objects.filter(id=self.teacher.id).exists())
+        self.assertEqual((Classroom.objects.count(), Quiz.objects.count(), QuizResult.objects.count()), (0, 0, 0))
+        self.assertTrue(Student.objects.filter(id=self.kid.id).exists())       # may be in other teachers' classes
+        self.assertTrue(User.objects.filter(id=self.admin.id).exists())
+
+    def test_login_updates_last_login(self):
+        APIClient().post("/gradely/login/", {"email": "t@x.com", "password": "Teach1234!"}, format="json")
+        self.assertIsNotNone(self.client.get(f"{self.url}{self.teacher.id}/").data["last_login"])

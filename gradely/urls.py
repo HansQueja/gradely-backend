@@ -15,6 +15,7 @@ from .views import (
     StudentViewSet,
     QuizViewSet,
     ScannerStatusView,
+    AdminFacultyViewSet,
     UploadStudentsView
 )
 
@@ -30,6 +31,7 @@ router.register(r'classrooms', ClassroomViewSet, basename='classroom')
 router.register(r'students', StudentViewSet)
 router.register(r'quizzes', QuizViewSet, basename='quiz')
 router.register(r'users', UserViewSet)
+router.register(r'admin/faculty', AdminFacultyViewSet, basename='admin-faculty')
 
 urlpatterns = [
     # Authentication

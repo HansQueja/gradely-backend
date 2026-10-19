@@ -30,6 +30,9 @@ from .serializers import (
     QuizDetailSerializer,
     QuizResultSerializer,
     CustomTokenObtainPairSerializer,
+    FacultyAdminSerializer,
+    FacultyAdminDetailSerializer,
+    SetPasswordSerializer,
 )
 
 import pandas as pd
@@ -107,6 +110,41 @@ class RejectFacultyView(generics.DestroyAPIView):
     queryset = User.objects.all()
     permission_classes = [isSchoolAdmin]
     lookup_field = 'pk'
+
+class AdminFacultyViewSet(viewsets.ModelViewSet):
+    """
+    Admin-only management of faculty accounts:
+      GET    /admin/faculty/               list, with class/student/quiz counts
+      POST   /admin/faculty/               create (starts approved)
+      GET    /admin/faculty/{id}/          details + their classes
+      PATCH  /admin/faculty/{id}/          edit name/email, approve, activate/deactivate
+      DELETE /admin/faculty/{id}/          delete the account AND their classes, quizzes, results
+      POST   /admin/faculty/{id}/set_password/
+    Admin accounts are never listed or touched here.
+    """
+    permission_classes = [isSchoolAdmin]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['is_active', 'is_approved']
+
+    def get_queryset(self):
+        return (User.objects.filter(role=User.Role.FACULTY)
+                .annotate(class_count=Count('classroom', distinct=True),
+                          student_count=Count('classroom__students', distinct=True),
+                          quiz_count=Count('classroom__quizzes', distinct=True))
+                .order_by('last_name', 'first_name', 'email'))
+
+    def get_serializer_class(self):
+        return FacultyAdminDetailSerializer if self.action == 'retrieve' else FacultyAdminSerializer
+
+    @action(detail=True, methods=['post'])
+    def set_password(self, request, pk=None):
+        faculty = self.get_object()
+        serializer = SetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        faculty.set_password(serializer.validated_data['password'])
+        faculty.save(update_fields=['password'])
+        return Response({"message": f"Password updated for {faculty.email}."})
+
 
 # To get the role on the passed token
 class CustomTokenObtainPairView(TokenObtainPairView):

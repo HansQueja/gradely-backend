@@ -34,6 +34,19 @@ Other quiz endpoints: `GET export_report/` (CSV with stats, item analysis and re
 
 `GET /gradely/scanner/status/` returns `{"ready", "image_storage"}`. The frontend polls it on the Scan tab because the free Hugging Face Space sleeps when idle and needs up to a minute to wake.
 
+### Admin: faculty management (`/gradely/admin/faculty/`, admins only)
+
+| Method | Path | What it does |
+|---|---|---|
+| `GET` | `admin/faculty/` | All faculty accounts with class/student/quiz counts (`?is_active=`, `?is_approved=` filters) |
+| `POST` | `admin/faculty/` | Create an account (`email`, `first_name`, `last_name`, `password`); it starts approved |
+| `GET` | `admin/faculty/{id}/` | One account plus their classes |
+| `PATCH` | `admin/faculty/{id}/` | Edit name/email, approve, or deactivate (`is_active: false` blocks login, keeps data) |
+| `DELETE` | `admin/faculty/{id}/` | Delete the account **and** their classes, quizzes and results (students stay) |
+| `POST` | `admin/faculty/{id}/set_password/` | Set a new password |
+
+Admin accounts never appear here, so admins can't delete each other (or themselves) from this page.
+
 ### Access rules
 * Teachers see and edit only their own classes, quizzes and enrolled students. Admins see everything.
 * Students are created by roster import and removed per class (`remove_student`), so `/students/` supports list, retrieve and update only.
