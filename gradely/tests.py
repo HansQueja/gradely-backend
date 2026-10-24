@@ -372,3 +372,60 @@ class AdminFacultyTests(TestCase):
     def test_login_updates_last_login(self):
         APIClient().post("/gradely/login/", {"email": "t@x.com", "password": "Teach1234!"}, format="json")
         self.assertIsNotNone(self.client.get(f"{self.url}{self.teacher.id}/").data["last_login"])
+
+
+class AdminQuizMonitoringTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(username="admin@x.com", email="admin@x.com", password="pw",
+                                              role=User.Role.ADMIN, is_approved=True)
+        self.ana = User.objects.create_user(username="ana@x.com", email="ana@x.com", password="pw",
+                                            first_name="Ana", last_name="Santos", role=User.Role.FACULTY, is_approved=True)
+        self.ben = User.objects.create_user(username="ben@x.com", email="ben@x.com", password="pw",
+                                            first_name="Ben", last_name="Reyes", role=User.Role.FACULTY, is_approved=True)
+        sci = Subject.objects.create(name="Science", code="SCI6", grade_level=6)
+        math = Subject.objects.create(name="Math", code="MATH5", grade_level=5)
+        rizal = Classroom.objects.create(teacher=self.ana, subject=sci, section_name="Rizal", school_year="2026-2027")
+        bonifacio = Classroom.objects.create(teacher=self.ben, subject=math, section_name="Bonifacio", school_year="2026-2027")
+        kids = [Student.objects.create(name=f"Kid {i}", student_id=f"26000{i}") for i in range(1, 5)]
+        rizal.students.add(*kids)
+        bonifacio.students.add(kids[0])
+        self.quiz = Quiz.objects.create(classroom=rizal, title="Science Quiz 1", total_score=20)
+        for kid, score in zip(kids[:3], (20, 15, 10)):          # 15/20 is exactly the 75% pass mark
+            QuizResult.objects.create(quiz=self.quiz, student=kid, score_obtained=score)
+        self.quiz.update_statistics()
+        Quiz.objects.create(classroom=bonifacio, title="Math Long Test", total_score=50)
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    def test_overview_rows(self):
+        rows = {r["title"]: r for r in self.client.get("/gradely/admin/quizzes/").data}
+        sci = rows["Science Quiz 1"]
+        self.assertEqual((sci["class_size"], sci["attendees_count"], sci["passing_count"]), (4, 3, 2))
+        self.assertEqual((sci["teacher_name"], sci["subject_code"], sci["grade_level"], sci["section_name"]),
+                         ("Ana Santos", "SCI6", 6, "Rizal"))
+        self.assertEqual(sci["passing_mark"], 15)
+        self.assertEqual(sci["mean_score"], 15.0)
+        self.assertIsNotNone(sci["last_scanned"])
+        math = rows["Math Long Test"]
+        self.assertEqual((math["class_size"], math["attendees_count"], math["passing_count"]), (1, 0, 0))
+        self.assertIsNone(math["last_scanned"])
+
+    def test_filters_and_search(self):
+        get = lambda **q: [r["title"] for r in self.client.get("/gradely/admin/quizzes/", q).data]
+        self.assertEqual(get(classroom__teacher=self.ben.id), ["Math Long Test"])
+        self.assertEqual(get(classroom__subject__grade_level=6), ["Science Quiz 1"])
+        self.assertEqual(get(search="santos"), ["Science Quiz 1"])
+        self.assertEqual(get(search="bonifacio"), ["Math Long Test"])
+
+    def test_admin_only(self):
+        self.client.force_authenticate(self.ana)
+        self.assertEqual(self.client.get("/gradely/admin/quizzes/").status_code, 403)
+
+    def test_admin_reads_any_quiz_detail_and_report(self):
+        detail = self.client.get(f"/gradely/quizzes/{self.quiz.id}/").data
+        self.assertEqual((detail["teacher_name"], detail["subject_code"], detail["grade_level"]), ("Ana Santos", "SCI6", 6))
+        self.assertEqual(len(detail["results"]), 4)                     # whole roster, incl. no result yet
+        self.assertEqual(self.client.get(f"/gradely/quizzes/{self.quiz.id}/export_report/").status_code, 200)
+        # ...but another teacher still can't
+        self.client.force_authenticate(self.ben)
+        self.assertEqual(self.client.get(f"/gradely/quizzes/{self.quiz.id}/").status_code, 404)

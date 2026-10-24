@@ -47,6 +47,14 @@ Other quiz endpoints: `GET export_report/` (CSV with stats, item analysis and re
 
 Admin accounts never appear here, so admins can't delete each other (or themselves) from this page.
 
+### Admin: quiz monitoring (admins only)
+
+`GET /gradely/admin/quizzes/` lists every quiz in the school with its teacher, subject, grade, section,
+class size, results count, passing count (`PASSING_PERCENT`, default 75%, of the items), mean/min/max
+and last scan time. Filters: `classroom`, `classroom__teacher`, `classroom__subject`,
+`classroom__subject__grade_level`, `classroom__school_year`; plus `search=` and `ordering=`.
+Admins open a quiz's full results with the normal `GET /quizzes/{id}/` and `export_report/`.
+
 ### Access rules
 * Teachers see and edit only their own classes, quizzes and enrolled students. Admins see everything.
 * Students are created by roster import and removed per class (`remove_student`), so `/students/` supports list, retrieve and update only.

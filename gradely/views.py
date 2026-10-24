@@ -1,4 +1,4 @@
-from rest_framework import generics, mixins, permissions, viewsets
+from rest_framework import filters, generics, mixins, permissions, viewsets
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.views import APIView
@@ -8,7 +8,8 @@ from rest_framework.decorators import action
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from django.db import transaction
-from django.db.models import Count
+from django.conf import settings
+from django.db.models import Count, F, Max, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
@@ -33,6 +34,7 @@ from .serializers import (
     FacultyAdminSerializer,
     FacultyAdminDetailSerializer,
     SetPasswordSerializer,
+    AdminQuizSerializer,
 )
 
 import pandas as pd
@@ -144,6 +146,34 @@ class AdminFacultyViewSet(viewsets.ModelViewSet):
         faculty.set_password(serializer.validated_data['password'])
         faculty.save(update_fields=['password'])
         return Response({"message": f"Password updated for {faculty.email}."})
+
+
+class AdminQuizViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """
+    Admin-only overview of every quiz in the school, for monitoring how classes are doing.
+      GET /admin/quizzes/?classroom__teacher=&classroom__subject__grade_level=&classroom__subject=
+                         &classroom__school_year=&search=&ordering=
+    Details and per-student results come from GET /quizzes/{id}/ (admins can read any quiz).
+    """
+    permission_classes = [isSchoolAdmin]
+    serializer_class = AdminQuizSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['classroom', 'classroom__teacher', 'classroom__subject',
+                        'classroom__subject__grade_level', 'classroom__school_year']
+    search_fields = ['title', 'classroom__section_name', 'classroom__subject__code', 'classroom__subject__name',
+                     'classroom__teacher__first_name', 'classroom__teacher__last_name']
+    ordering_fields = ['created_at', 'mean_score', 'attendees_count', 'title', 'last_scanned']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        passing = settings.PASSING_PERCENT / 100
+        return (Quiz.objects.select_related('classroom__subject', 'classroom__teacher')
+                .annotate(
+                    class_size=Count('classroom__students', distinct=True),
+                    passing_count=Count('results', distinct=True,
+                                        filter=Q(results__score_obtained__gte=F('total_score') * passing)),
+                    last_scanned=Max('results__date_taken'),
+                ))
 
 
 # To get the role on the passed token

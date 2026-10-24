@@ -1,3 +1,6 @@
+import math
+
+from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.db.models import Count
 from rest_framework import serializers
@@ -143,18 +146,32 @@ class QuizDetailSerializer(serializers.ModelSerializer):
     has_answer_key = serializers.SerializerMethodField()
     
     classroom_name = serializers.CharField(source='classroom.section_name', read_only=True)
-    
+    subject_code = serializers.CharField(source='classroom.subject.code', read_only=True)
+    subject_name = serializers.CharField(source='classroom.subject.name', read_only=True)
+    grade_level = serializers.IntegerField(source='classroom.subject.grade_level', read_only=True)
+    school_year = serializers.CharField(source='classroom.school_year', read_only=True)
+    teacher_name = serializers.SerializerMethodField()
+    passing_mark = serializers.SerializerMethodField()
+
     class Meta:
         model = Quiz
         fields = [
             'id', 'title', 'total_score', 'mean_score', 'min_score', 'max_score',
             'attendees_count', 'classroom', 'classroom_name', 'results', 'item_analysis', 'created_at',
             'answer_key', 'has_answer_key',
+            'subject_code', 'subject_name', 'grade_level', 'school_year', 'teacher_name', 'passing_mark',
         ]
 
     def get_has_answer_key(self, obj):
         return len(obj.answer_key or {}) == obj.total_score
     
+    def get_teacher_name(self, obj):
+        t = obj.classroom.teacher
+        return f"{t.first_name} {t.last_name}".strip() or t.email
+
+    def get_passing_mark(self, obj):
+        return math.ceil(obj.total_score * settings.PASSING_PERCENT / 100)
+
     def get_results(self, obj):
         all_students = obj.classroom.students.all().order_by('name') 
         
@@ -339,3 +356,43 @@ class SetPasswordSerializer(serializers.Serializer):
     def validate_password(self, value):
         validate_password(value)
         return value
+
+
+# ==========================================
+# ADMIN: QUIZ MONITORING
+# ==========================================
+class AdminQuizSerializer(serializers.ModelSerializer):
+    """One row of the admin quiz overview. Counts come from AdminQuizViewSet annotations."""
+    section_name = serializers.CharField(source='classroom.section_name', read_only=True)
+    school_year = serializers.CharField(source='classroom.school_year', read_only=True)
+    subject_code = serializers.CharField(source='classroom.subject.code', read_only=True)
+    subject_name = serializers.CharField(source='classroom.subject.name', read_only=True)
+    grade_level = serializers.IntegerField(source='classroom.subject.grade_level', read_only=True)
+    teacher_id = serializers.IntegerField(source='classroom.teacher_id', read_only=True)
+    teacher_name = serializers.SerializerMethodField()
+    class_size = serializers.IntegerField(read_only=True)
+    passing_count = serializers.IntegerField(read_only=True)
+    last_scanned = serializers.DateTimeField(read_only=True)
+    has_answer_key = serializers.SerializerMethodField()
+    passing_mark = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Quiz
+        fields = [
+            'id', 'title', 'total_score', 'created_at', 'classroom',
+            'section_name', 'school_year', 'subject_code', 'subject_name', 'grade_level',
+            'teacher_id', 'teacher_name',
+            'class_size', 'attendees_count', 'passing_count', 'mean_score', 'min_score', 'max_score',
+            'last_scanned', 'has_answer_key', 'passing_mark',
+        ]
+
+    def get_teacher_name(self, obj):
+        t = obj.classroom.teacher
+        return f"{t.first_name} {t.last_name}".strip() or t.email
+
+    def get_has_answer_key(self, obj):
+        return len(obj.answer_key or {}) == obj.total_score
+
+    def get_passing_mark(self, obj):
+        # lowest score that counts as passing, e.g. 15 of 20 at 75%
+        return math.ceil(obj.total_score * settings.PASSING_PERCENT / 100)

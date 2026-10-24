@@ -169,6 +169,9 @@ CORS_ALLOW_CREDENTIALS = True
 # ==========================================
 # The FastAPI service that renders answer sheets and reads scanned photos.
 
+# Share of a quiz's items a student needs to count as passing (admin quiz overview).
+PASSING_PERCENT = env.int('PASSING_PERCENT', default=75)
+
 SCANNER_API_URL = env('SCANNER_API_URL', default='https://azcreas-gradely-scanner-api.hf.space').rstrip('/')
 SCANNER_API_KEY = env('SCANNER_API_KEY', default='').strip()  # tolerate pasted whitespace/newlines
 SCANNER_TIMEOUT = env.int('SCANNER_TIMEOUT', default=120)  # seconds per request
