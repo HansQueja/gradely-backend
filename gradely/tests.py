@@ -429,3 +429,128 @@ class AdminQuizMonitoringTests(TestCase):
         # ...but another teacher still can't
         self.client.force_authenticate(self.ben)
         self.assertEqual(self.client.get(f"/gradely/quizzes/{self.quiz.id}/").status_code, 404)
+
+
+from datetime import datetime, timedelta, timezone as dt_timezone
+from django.test import override_settings
+from . import image_retention
+
+SUPA = dict(SUPABASE_URL="https://proj.supabase.co", SUPABASE_SERVICE_KEY="service-key",
+            SUPABASE_BUCKET="answer-sheets", SCANNED_IMAGE_RETENTION_DAYS=3)
+
+
+class FakeStorage:
+    """Stands in for the Supabase Storage REST API (list sorted by created_at, delete by name)."""
+
+    def __init__(self, files):
+        self.files = dict(files)        # name -> created_at datetime
+        self.deleted = []
+
+    def post(self, url, headers, json, timeout):
+        assert url.endswith("/storage/v1/object/list/answer-sheets") and headers["apikey"] == "service-key"
+        ordered = sorted(self.files.items(), key=lambda kv: kv[1])
+        page = ordered[json["offset"]:json["offset"] + json["limit"]]
+        body = [{"name": n, "id": f"id-{n}", "created_at": t.isoformat().replace("+00:00", "Z")} for n, t in page]
+        return mock.Mock(status_code=200, json=lambda: body, raise_for_status=lambda: None)
+
+    def delete(self, url, headers, json, timeout):
+        assert url.endswith("/storage/v1/object/answer-sheets")
+        for name in json["prefixes"]:
+            self.deleted.append(name)
+            self.files.pop(name, None)
+        return mock.Mock(status_code=200, raise_for_status=lambda: None)
+
+
+@override_settings(**SUPA)
+class ImageRetentionTests(TestCase):
+    def setUp(self):
+        now = datetime.now(dt_timezone.utc)
+        self.storage = FakeStorage({
+            "old1.jpg": now - timedelta(days=5),
+            "old2.jpg": now - timedelta(days=4),
+            "orphan.jpg": now - timedelta(days=10),     # scanned but never saved
+            "fresh.jpg": now - timedelta(hours=5),
+        })
+        teacher = User.objects.create_user(username="t@x.com", email="t@x.com", password="pw", role=User.Role.FACULTY)
+        subject = Subject.objects.create(name="S", code="S1")
+        classroom = Classroom.objects.create(teacher=teacher, subject=subject, section_name="A", school_year="26")
+        quiz = Quiz.objects.create(classroom=classroom, title="Q", total_score=5)
+        base = "https://proj.supabase.co/storage/v1/object/public/answer-sheets/"
+        self.results = [
+            QuizResult.objects.create(quiz=quiz, student=Student.objects.create(name=f"K{i}", student_id=f"26000{i}"),
+                                      score_obtained=3, scanned_image_url=url, student_answers={"1": {"selected": "A"}})
+            for i, url in enumerate([base + "old1.jpg", base + "old2.jpg?", base + "fresh.jpg", None], start=1)
+        ]
+
+    def run_purge(self, **kw):
+        with mock.patch.object(image_retention.requests, "post", self.storage.post), \
+             mock.patch.object(image_retention.requests, "delete", self.storage.delete):
+            return image_retention.purge(**kw)
+
+    def test_deletes_only_old_images_and_unlinks_their_results(self):
+        report = self.run_purge()
+        self.assertEqual(sorted(report.deleted), ["old1.jpg", "old2.jpg", "orphan.jpg"])
+        self.assertEqual(list(self.storage.files), ["fresh.jpg"])
+        self.assertEqual(report.results_cleared, 2)
+        urls = [QuizResult.objects.get(id=r.id).scanned_image_url for r in self.results]
+        self.assertEqual(urls[:2], [None, None])
+        self.assertTrue(urls[2].endswith("fresh.jpg"))
+        self.assertEqual(QuizResult.objects.get(id=self.results[0].id).score_obtained, 3)   # score kept
+        self.assertEqual(QuizResult.objects.get(id=self.results[0].id).student_answers, {"1": {"selected": "A"}})
+
+    def test_dry_run_changes_nothing(self):
+        report = self.run_purge(dry_run=True)
+        self.assertEqual(len(report.deleted), 3)
+        self.assertEqual(self.storage.deleted, [])
+        self.assertIsNotNone(QuizResult.objects.get(id=self.results[0].id).scanned_image_url)
+
+    def test_custom_days_and_paging(self):
+        with mock.patch.object(image_retention, "PAGE_SIZE", 2):
+            report = self.run_purge(days=7, dry_run=True)
+            self.assertEqual(report.deleted, ["orphan.jpg"])
+            self.assertEqual(report.checked, 2)    # first page already reached newer files: stop
+            report = self.run_purge(days=1, dry_run=True)
+            self.assertEqual(report.deleted, ["orphan.jpg", "old1.jpg", "old2.jpg"])
+            self.assertEqual(report.checked, 4)    # needed the second page
+
+    @override_settings(SUPABASE_SERVICE_KEY="")
+    def test_skipped_without_credentials(self):
+        report = self.run_purge()
+        self.assertIn("not set", report.skipped_reason)
+        self.assertEqual(self.storage.deleted, [])
+
+    def test_management_command(self):
+        from django.core.management import call_command
+        out = io.StringIO()
+        with mock.patch.object(image_retention.requests, "post", self.storage.post), \
+             mock.patch.object(image_retention.requests, "delete", self.storage.delete):
+            call_command("purge_scanned_images", "--dry-run", stdout=out)
+            self.assertIn("Would delete 3 image(s)", out.getvalue())
+            call_command("purge_scanned_images", stdout=out)
+        self.assertIn("Removed the image link from 2 saved result(s)", out.getvalue())
+
+    def test_background_trigger_runs_at_most_once_per_interval(self):
+        class SyncThread:
+            def __init__(self, target, **kw): self.target = target
+            def start(self): self.target()
+        with mock.patch.object(image_retention, "purge", return_value=image_retention.PurgeReport()) as purge, \
+             mock.patch.object(image_retention.threading, "Thread", SyncThread), \
+             mock.patch.object(image_retention, "_last_auto_run", 0.0):
+            image_retention.maybe_purge_in_background()
+            image_retention.maybe_purge_in_background()
+        self.assertEqual(purge.call_count, 1)
+
+
+class RetentionExposedTests(TestCase):
+    def test_quiz_detail_reports_retention(self):
+        teacher = User.objects.create_user(username="t@x.com", email="t@x.com", password="pw",
+                                           role=User.Role.FACULTY, is_approved=True)
+        classroom = Classroom.objects.create(teacher=teacher, subject=Subject.objects.create(name="S", code="S1"),
+                                             section_name="A", school_year="26")
+        quiz = Quiz.objects.create(classroom=classroom, title="Q", total_score=5)
+        client = APIClient()
+        client.force_authenticate(teacher)
+        with override_settings(SCANNED_IMAGE_RETENTION_DAYS=3):
+            self.assertEqual(client.get(f"/gradely/quizzes/{quiz.id}/").data["image_retention_days"], 3)
+        with override_settings(SCANNED_IMAGE_RETENTION_DAYS=0):
+            self.assertIsNone(client.get(f"/gradely/quizzes/{quiz.id}/").data["image_retention_days"])

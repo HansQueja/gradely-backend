@@ -14,7 +14,7 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
-from . import answer_keys, scanner_client
+from . import answer_keys, image_retention, scanner_client
 from .permissions import isSchoolAdmin
 from .student_ids import allocate_student_ids
 from .models import User, Classroom, Quiz, Subject, Student, QuizResult
@@ -570,6 +570,7 @@ class QuizViewSet(viewsets.ModelViewSet):
             data = scanner_client.scan_sheets(files, quiz.answer_key)
         except scanner_client.ScannerError as e:
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+        image_retention.maybe_purge_in_background()   # tidy up old sheet images now and then
 
         roster = {s.student_id: s for s in quiz.classroom.students.all()}
         saved_ids = set(quiz.results.values_list('student_id', flat=True))

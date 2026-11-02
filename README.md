@@ -87,6 +87,10 @@ python manage.py runserver
 | `DB_SSL_REQUIRE` | no | default `True`; set `False` for a local database |
 | `SCANNER_API_URL` | no | default `https://azcreas-gradely-scanner-api.hf.space`; use `http://127.0.0.1:7860` for a local scanner |
 | `SCANNER_API_KEY` | no | shared secret sent as `X-API-Key`; must match the scanner's `SCANNER_API_KEY` |
+| `SUPABASE_URL` | for image cleanup | e.g. `https://<project>.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | for image cleanup | the project's **secret** key (`sb_secret_…`); the publishable key can't list or delete files |
+| `SUPABASE_BUCKET` | no | default `answer-sheets` |
+| `SCANNED_IMAGE_RETENTION_DAYS` | no | delete graded sheet images after this many days, default `3`; `0` keeps them forever |
 | `SCANNER_TIMEOUT` | no | seconds per scanner request, default `120` (a sleeping Hugging Face Space can take a while to wake up) |
 
 ### Tests
@@ -101,3 +105,15 @@ DATABASE_URL=sqlite:///db.sqlite3 DB_SSL_REQUIRE=False python manage.py test gra
 ```
 
 `DATABASE_URL` takes precedence over `DATABASE_URI`, so you can also use it to run the whole app locally on SQLite.
+
+### Graded image cleanup
+
+Graded answer-sheet images in Supabase Storage are deleted after `SCANNED_IMAGE_RETENTION_DAYS`
+(default 3). Scores and per-item answers are kept; the result just loses its `scanned_image_url`.
+It runs by itself in the background (at most every 6 hours, triggered by scanning), and on demand:
+
+```bash
+python manage.py purge_scanned_images --dry-run   # what would be deleted
+python manage.py purge_scanned_images             # delete
+python manage.py purge_scanned_images --days 7    # a different cut-off, this run only
+```

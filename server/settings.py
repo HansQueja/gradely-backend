@@ -169,6 +169,13 @@ CORS_ALLOW_CREDENTIALS = True
 # ==========================================
 # The FastAPI service that renders answer sheets and reads scanned photos.
 
+# Graded answer-sheet images (uploaded by the scanner) are deleted from Supabase Storage
+# after this many days to save space; scores are kept. 0 keeps them forever.
+SUPABASE_URL = env('SUPABASE_URL', default='').strip()
+SUPABASE_SERVICE_KEY = env('SUPABASE_SERVICE_KEY', default='').strip()
+SUPABASE_BUCKET = env('SUPABASE_BUCKET', default='answer-sheets')
+SCANNED_IMAGE_RETENTION_DAYS = env.int('SCANNED_IMAGE_RETENTION_DAYS', default=3)
+
 # Share of a quiz's items a student needs to count as passing (admin quiz overview).
 PASSING_PERCENT = env.int('PASSING_PERCENT', default=75)
 

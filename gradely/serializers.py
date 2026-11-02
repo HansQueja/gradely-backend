@@ -152,6 +152,7 @@ class QuizDetailSerializer(serializers.ModelSerializer):
     school_year = serializers.CharField(source='classroom.school_year', read_only=True)
     teacher_name = serializers.SerializerMethodField()
     passing_mark = serializers.SerializerMethodField()
+    image_retention_days = serializers.SerializerMethodField()
 
     class Meta:
         model = Quiz
@@ -160,6 +161,7 @@ class QuizDetailSerializer(serializers.ModelSerializer):
             'attendees_count', 'classroom', 'classroom_name', 'results', 'item_analysis', 'created_at',
             'answer_key', 'has_answer_key',
             'subject_code', 'subject_name', 'grade_level', 'school_year', 'teacher_name', 'passing_mark',
+            'image_retention_days',
         ]
 
     def get_has_answer_key(self, obj):
@@ -171,6 +173,9 @@ class QuizDetailSerializer(serializers.ModelSerializer):
 
     def get_passing_mark(self, obj):
         return math.ceil(obj.total_score * settings.PASSING_PERCENT / 100)
+
+    def get_image_retention_days(self, obj):
+        return settings.SCANNED_IMAGE_RETENTION_DAYS or None   # None: images are kept
 
     def get_results(self, obj):
         all_students = obj.classroom.students.all().order_by('name') 
