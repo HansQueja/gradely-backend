@@ -164,6 +164,9 @@ CORS_ALLOWED_ORIGINS = [
 
 CORS_ALLOW_CREDENTIALS = True
 
+# Let the frontend read how many graded images made it into a results ZIP (QuizViewSet.export_results)
+CORS_EXPOSE_HEADERS = ["Content-Disposition", "X-Images-Included", "X-Images-Missing"]
+
 # ==========================================
 # 9. GRADELY SCANNER API
 # ==========================================

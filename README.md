@@ -30,7 +30,12 @@ frontend (Next.js) ──► backend (this repo, Django) ──► scanner (Fast
 | 3 | `POST scan/` | Multipart `files` (photos). Django forwards them with the key to the scanner and matches each shaded ID to the class roster. **Nothing is saved yet.** |
 | 4 | `POST save_results/` | `{"results": [{"student_id", "student_answers", "scanned_image_url"}]}` after the teacher's review. Scores are recomputed on the server from the stored key. |
 
-Other quiz endpoints: `GET export_report/` (CSV with stats, item analysis and results).
+Other quiz endpoints:
+* `GET export_report/`: CSV with stats, item analysis and results.
+* `GET export_results/`: ZIP with `report.csv`, `answers.csv` (the letter every student shaded on each item),
+  `graded_sheets/<ID>_<Name>.jpg` and a `README.txt` listing students whose image is gone (see
+  *Graded image cleanup*). Headers `X-Images-Included` / `X-Images-Missing` give the counts. Images are
+  only fetched from Supabase Storage or the scanner's host.
 
 `GET /gradely/scanner/status/` returns `{"ready", "image_storage"}`. The frontend polls it on the Scan tab because the free Hugging Face Space sleeps when idle and needs up to a minute to wake.
 

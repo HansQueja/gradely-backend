@@ -554,3 +554,87 @@ class RetentionExposedTests(TestCase):
             self.assertEqual(client.get(f"/gradely/quizzes/{quiz.id}/").data["image_retention_days"], 3)
         with override_settings(SCANNED_IMAGE_RETENTION_DAYS=0):
             self.assertIsNone(client.get(f"/gradely/quizzes/{quiz.id}/").data["image_retention_days"])
+
+
+class FakeImageResponse:
+    def __init__(self, status=200, content_type="image/jpeg", body=b"\xff\xd8jpeg"):
+        self.status_code, self.headers, self.body = status, {"Content-Type": content_type}, body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, size):
+        yield self.body
+
+
+class ResultsZipTests(TestCase):
+    """GET /quizzes/{id}/export_results/: report + answers + graded sheet images in one ZIP."""
+    BUCKET = "https://proj.supabase.co/storage/v1/object/public/answer-sheets"
+
+    def setUp(self):
+        self.teacher = User.objects.create_user(username="t@x.com", email="t@x.com", password="pw",
+                                                role=User.Role.FACULTY, is_approved=True)
+        self.other = User.objects.create_user(username="o@x.com", email="o@x.com", password="pw",
+                                              role=User.Role.FACULTY, is_approved=True)
+        subject = Subject.objects.create(name="Science", code="SCI6", grade_level=6)
+        room = Classroom.objects.create(teacher=self.teacher, subject=subject, section_name="Rizal")
+        self.quiz = Quiz.objects.create(classroom=room, title="Quiz 1", total_score=2,
+                                        answer_key={"1": "A", "2": "B"})
+        self.kids = [Student.objects.create(name=n, student_id=sid) for n, sid in
+                     (("José Peña", "260001"), ("Ana Cruz", "260002"), ("Ben Reyes", "260003"))]
+        room.students.add(*self.kids)
+        answers = lambda a, b: {"1": {"selected": a, "correct": a == "A"}, "2": {"selected": b, "correct": b == "B"}}
+        QuizResult.objects.create(quiz=self.quiz, student=self.kids[0], score_obtained=2,
+                                  student_answers=answers("A", "B"), scanned_image_url=f"{self.BUCKET}/a.jpg")
+        QuizResult.objects.create(quiz=self.quiz, student=self.kids[1], score_obtained=1,
+                                  student_answers=answers("A", "-"), scanned_image_url=None)    # image deleted
+        self.quiz.update_statistics()
+        self.client = APIClient()
+        self.client.force_authenticate(self.teacher)
+
+    def _download(self, fake_get):
+        import zipfile
+        with mock.patch("gradely.exports.requests.get", side_effect=fake_get) as get:
+            response = self.client.get(f"/gradely/quizzes/{self.quiz.id}/export_results/")
+        self.assertEqual(response.status_code, 200)
+        archive = zipfile.ZipFile(io.BytesIO(b"".join(response.streaming_content)))
+        return response, {n.split("/", 1)[1]: archive.read(n) for n in archive.namelist()}, get
+
+    def test_zip_contents(self):
+        response, files, _ = self._download(lambda url, **kw: FakeImageResponse())
+        self.assertIn("Quiz_1_Rizal_Results.zip", response["Content-Disposition"])
+        self.assertEqual((response["X-Images-Included"], response["X-Images-Missing"]), ("1", "1"))
+        self.assertEqual(sorted(files), ["README.txt", "answers.csv", "graded_sheets/260001_Jos_Pe_a.jpg", "report.csv"])
+        self.assertEqual(files["graded_sheets/260001_Jos_Pe_a.jpg"], b"\xff\xd8jpeg")
+
+        answers = files["answers.csv"].decode("utf-8-sig").splitlines()
+        self.assertEqual(answers[0], "Student ID,Name,Score,Percentage,Wrong Items,Q1,Q2")
+        self.assertEqual(answers[1], ",ANSWER KEY,2,100%,,A,B")
+        self.assertEqual(answers[2], "260002,Ana Cruz,1,50.0%,2,A,-")
+        self.assertEqual(answers[3], "260001,José Peña,2,100.0%,,A,B")
+        report = files["report.csv"].decode("utf-8-sig")
+        self.assertIn("260003,Ben Reyes,N/A,N/A,Not Taken", report)       # whole roster, like export_report
+        self.assertIn("260002 Ana Cruz", files["README.txt"].decode())     # listed as having no image
+
+    def test_unreachable_or_non_image_is_reported_missing(self):
+        response, files, _ = self._download(lambda url, **kw: FakeImageResponse(status=404))
+        self.assertEqual(response["X-Images-Included"], "0")
+        self.assertFalse(any(n.startswith("graded_sheets/") for n in files))
+        _, files, _ = self._download(lambda url, **kw: FakeImageResponse(content_type="text/html"))
+        self.assertFalse(any(n.startswith("graded_sheets/") for n in files))
+
+    def test_only_fetches_from_image_storage_hosts(self):
+        QuizResult.objects.filter(student=self.kids[0]).update(scanned_image_url="http://169.254.169.254/latest")
+        _, files, get = self._download(lambda url, **kw: FakeImageResponse())
+        get.assert_not_called()
+        self.assertIn("260001 José Peña", files["README.txt"].decode())
+
+    def test_access_and_empty_quiz(self):
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.get(f"/gradely/quizzes/{self.quiz.id}/export_results/").status_code, 404)
+        self.client.force_authenticate(self.teacher)
+        self.quiz.results.all().delete()
+        self.assertEqual(self.client.get(f"/gradely/quizzes/{self.quiz.id}/export_results/").status_code, 400)
