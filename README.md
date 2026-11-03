@@ -18,8 +18,8 @@ frontend (Next.js) ──► backend (this repo, Django) ──► scanner (Fast
 * **`Subject`**: course (`code`, `name`, `grade_level`).
 * **`Classroom`**: a teacher's section of a subject, with its student roster.
 * **`Student`**: `name` plus a 6-digit `student_id` in the format **`YYNNNN`**: the year they were registered plus a sequence number (e.g. `260001`). Students shade this ID on the answer sheet.
-* **`Quiz`**: belongs to a classroom. `total_score` is the **number of items** (1–100, one point each). `answer_key` is `{"1": "A", ...}`. It also caches mean/min/max/attendee statistics.
-* **`QuizResult`**: one per student per quiz: score, per-item `student_answers` (`selected`, `key`, `correct`, `needs_review`), and `scanned_image_url` (the graded sheet image).
+* **`Quiz`**: belongs to a classroom, with a `date_given` (defaults to the day it's created). `total_score` is the **number of items** (1–100, one point each). `answer_key` is `{"1": "A", ...}`. It also caches mean/min/max/attendee statistics.
+* **`QuizResult`**: one per student per quiz: score, per-item `student_answers` (`selected`, `key`, `correct`, `needs_review`), `scanned_image_url` (the graded sheet image) and `entered_manually`.
 
 ## Scanning workflow (`/gradely/quizzes/{id}/...`)
 
@@ -29,6 +29,14 @@ frontend (Next.js) ──► backend (this repo, Django) ──► scanner (Fast
 | 2 | `GET answer_sheet/` | Printable PDF from the scanner, pre-filled with the quiz title, subject, teacher and grade & section. |
 | 3 | `POST scan/` | Multipart `files` (photos). Django forwards them with the key to the scanner and matches each shaded ID to the class roster. **Nothing is saved yet.** |
 | 4 | `POST save_results/` | `{"results": [{"student_id", "student_answers", "scanned_image_url"}]}` after the teacher's review. Scores are recomputed on the server from the stored key. |
+
+Fixing results (the teacher's own quizzes, or any quiz for admins):
+
+| Method | Path | What it does |
+|---|---|---|
+| `POST` | `manual_result/` | `{"student_pk", "answers": {"1": "A", ...}}` or `{"student_pk", "score": 17}` for a sheet that can't be scanned |
+| `PATCH` | `results/{result_id}/` | Same body: correct a saved result; its graded image is kept |
+| `DELETE` | `results/{result_id}/` | Remove a wrong result |
 
 Other quiz endpoints:
 * `GET export_report/`: CSV with stats, item analysis and results.
@@ -66,7 +74,24 @@ Admins open a quiz's full results with the normal `GET /quizzes/{id}/` and `expo
 * `/users/` returns only the requesting user, unless they're an admin.
 * A quiz's number of items can't change once it has saved results.
 
-Roster import: `POST /gradely/classrooms/{id}/upload-students/` with a CSV/Excel file that has a `name` column. New students get the next `YYNNNN` IDs.
+### Classes and students (`/gradely/classrooms/{id}/...`)
+
+* `POST upload-students/` (path `classrooms/{id}/upload-students/`): CSV/Excel with a `name` column and an optional
+  `student_id` column. Matching rules (see `gradely/rosters.py`): a row with an ID is that exact student; a name that
+  appears twice in one file is two students; otherwise a name matches a student already in the class first, then the
+  oldest other one, with a warning when it's ambiguous. New students get the next `YYNNNN` IDs. The response has `warnings`.
+* `POST add_student/`: `{"name"}` adds one student. If others already have that name, it answers `409` with
+  `candidates`; send `{"student_pk"}` to enroll one of them or `{"name", "create_new": true}` for a new student.
+* `GET students/{student_pk}/`: one student's results on every quiz of the class, with average and pass/fail.
+* `GET gradebook/`: CSV of every student against every quiz, with each student's average.
+
+### Subjects and accounts
+* Subjects are shared by every teacher. Anyone signed in can list and add them; only admins edit or delete them, and
+  a subject that still has classes can't be deleted.
+* Sign-ups are always faculty accounts (the role can't be chosen). `admin/reject/{id}/` only deletes pending sign-ups.
+* `PATCH auth/users/me/` edits your own name; `POST auth/users/me/password/` `{current_password, new_password}`
+  changes your password. A forgotten password is reset by an admin (`admin/faculty/{id}/set_password/`).
+* Login, password change and sign-up are rate-limited per IP (`DEFAULT_THROTTLE_RATES` in settings).
 
 ---
 
@@ -88,7 +113,8 @@ python manage.py runserver
 |---|---|---|
 | `SECRET_KEY` | yes | Django secret key |
 | `DATABASE_URI` | yes | Supabase Postgres connection string |
-| `DEBUG` | no | default `True` |
+| `DEBUG` | no | default `False`; set `True` in your local `.env` only |
+| `ALLOWED_HOSTS` | no | comma-separated; default `localhost,127.0.0.1,.onrender.com` (Render's own hostname is added automatically) |
 | `DB_SSL_REQUIRE` | no | default `True`; set `False` for a local database |
 | `SCANNER_API_URL` | no | default `https://azcreas-gradely-scanner-api.hf.space`; use `http://127.0.0.1:7860` for a local scanner |
 | `SCANNER_API_KEY` | no | shared secret sent as `X-API-Key`; must match the scanner's `SCANNER_API_KEY` |

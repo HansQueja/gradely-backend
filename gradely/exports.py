@@ -42,7 +42,7 @@ def write_report(quiz, writer):
     writer.writerow(['QUIZ REPORT', quiz.title])
     writer.writerow(['Classroom', quiz.classroom.section_name])
     writer.writerow(['Subject', quiz.classroom.subject.code])
-    writer.writerow(['Date Created', quiz.created_at.strftime('%Y-%m-%d')])
+    writer.writerow(['Date Given', (quiz.date_given or quiz.created_at.date()).strftime('%Y-%m-%d')])
     writer.writerow([])
 
     writer.writerow(['STATISTICS'])

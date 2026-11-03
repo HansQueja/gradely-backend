@@ -638,3 +638,155 @@ class ResultsZipTests(TestCase):
         self.client.force_authenticate(self.teacher)
         self.quiz.results.all().delete()
         self.assertEqual(self.client.get(f"/gradely/quizzes/{self.quiz.id}/export_results/").status_code, 400)
+
+
+class PlatformReviewTests(TestCase):
+    """Access fixes, result editing, adding students, per-student view and gradebook (2026-11 review)."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()   # login throttle counts live in the cache
+        self.admin = User.objects.create_user(username="a@x.com", email="a@x.com", password="pw",
+                                              role=User.Role.ADMIN, is_approved=True)
+        self.teacher = User.objects.create_user(username="t@x.com", email="t@x.com", password="Teach1234!",
+                                                role=User.Role.FACULTY, is_approved=True)
+        self.other = User.objects.create_user(username="o@x.com", email="o@x.com", password="pw",
+                                              role=User.Role.FACULTY, is_approved=True)
+        self.subject = Subject.objects.create(name="Science", code="SCI6", grade_level=6)
+        self.room = Classroom.objects.create(teacher=self.teacher, subject=self.subject, section_name="Rizal")
+        self.kid = Student.objects.create(name="Ana Cruz", student_id="260001")
+        self.room.students.add(self.kid)
+        self.quiz = Quiz.objects.create(classroom=self.room, title="Quiz 1", total_score=4,
+                                        answer_key={"1": "A", "2": "B", "3": "C", "4": "D"})
+        self.client = APIClient()
+        self.client.force_authenticate(self.teacher)
+
+    # --- subjects -------------------------------------------------------
+    def test_teachers_add_subjects_but_only_admins_edit_or_delete(self):
+        self.assertEqual(self.client.post("/gradely/subjects/", {"name": "Math", "code": "M6", "grade_level": 6}).status_code, 201)
+        self.assertEqual(self.client.patch(f"/gradely/subjects/{self.subject.id}/", {"name": "X"}).status_code, 403)
+        self.assertEqual(self.client.delete(f"/gradely/subjects/{self.subject.id}/").status_code, 403)
+        self.client.force_authenticate(self.admin)
+        response = self.client.delete(f"/gradely/subjects/{self.subject.id}/")
+        self.assertEqual(response.status_code, 400)                    # still has a class
+        self.assertTrue(Classroom.objects.filter(id=self.room.id).exists())
+        listed = {s["code"]: s for s in self.client.get("/gradely/subjects/").data}
+        self.assertEqual(listed["SCI6"]["class_count"], 1)
+        self.assertEqual(self.client.delete(f"/gradely/subjects/{listed['M6']['id']}/").status_code, 204)
+
+    # --- accounts -------------------------------------------------------
+    def test_signup_is_always_faculty(self):
+        APIClient().post("/gradely/signup/", {"email": "new@x.com", "password": "Sturdy-pass-91",
+                                              "first_name": "N", "last_name": "W", "role": "ADMIN"})
+        self.assertEqual(User.objects.get(email="new@x.com").role, User.Role.FACULTY)
+
+    def test_reject_only_deletes_pending_signups(self):
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.delete(f"/gradely/admin/reject/{self.teacher.id}/").status_code, 404)
+        self.assertEqual(self.client.delete(f"/gradely/admin/reject/{self.admin.id}/").status_code, 404)
+        pending = User.objects.create_user(username="p@x.com", email="p@x.com", password="pw")
+        self.assertEqual(self.client.delete(f"/gradely/admin/reject/{pending.id}/").status_code, 204)
+
+    def test_login_is_rate_limited(self):
+        anon = APIClient()
+        codes = [anon.post("/gradely/login/", {"email": "t@x.com", "password": "wrong"}).status_code for _ in range(11)]
+        self.assertEqual(codes[:10], [401] * 10)
+        self.assertEqual(codes[10], 429)
+
+    def test_edit_own_name_and_change_password(self):
+        self.assertEqual(self.client.patch("/gradely/auth/users/me/", {"first_name": "Teri", "role": "ADMIN"}).status_code, 200)
+        self.teacher.refresh_from_db()
+        self.assertEqual((self.teacher.first_name, self.teacher.role), ("Teri", User.Role.FACULTY))
+        url = "/gradely/auth/users/me/password/"
+        self.assertEqual(self.client.post(url, {"current_password": "nope", "new_password": "Brand-new-77"}).status_code, 400)
+        self.assertEqual(self.client.post(url, {"current_password": "Teach1234!", "new_password": "12345678"}).status_code, 400)
+        self.assertEqual(self.client.post(url, {"current_password": "Teach1234!", "new_password": "Brand-new-77"}).status_code, 200)
+        self.teacher.refresh_from_db()
+        self.assertTrue(self.teacher.check_password("Brand-new-77"))
+
+    # --- results ----------------------------------------------------------
+    def test_manual_result_by_answers_or_score(self):
+        url = f"/gradely/quizzes/{self.quiz.id}/manual_result/"
+        response = self.client.post(url, {"student_pk": self.kid.id, "answers": {"1": "A", "2": "b", "3": "", "4": "A"}}, format="json")
+        self.assertEqual(response.status_code, 201)
+        result = QuizResult.objects.get(quiz=self.quiz, student=self.kid)
+        self.assertEqual((result.score_obtained, result.entered_manually), (2, True))
+        self.assertEqual(result.student_answers["3"]["selected"], "-")
+        self.client.post(url, {"student_pk": self.kid.id, "score": 3}, format="json")
+        result.refresh_from_db()
+        self.assertEqual((result.score_obtained, result.student_answers), (3, {}))
+        self.quiz.refresh_from_db()
+        self.assertEqual((self.quiz.attendees_count, self.quiz.mean_score), (1, 3.0))
+        for bad in ({"score": 5}, {"score": 1.5}, {"answers": {"1": "E"}}, {}):
+            self.assertEqual(self.client.post(url, {"student_pk": self.kid.id, **bad}, format="json").status_code, 400, bad)
+
+    def test_edit_and_delete_saved_result(self):
+        result = QuizResult.objects.create(quiz=self.quiz, student=self.kid, score_obtained=1,
+                                           scanned_image_url="https://p.supabase.co/x.jpg",
+                                           student_answers={"1": {"selected": "A", "correct": True, "needs_review": True}})
+        url = f"/gradely/quizzes/{self.quiz.id}/results/{result.id}/"
+        response = self.client.patch(url, {"answers": {"1": "A", "2": "B", "3": "C", "4": "-"}}, format="json")
+        self.assertEqual(response.status_code, 200)
+        result.refresh_from_db()
+        self.assertEqual(result.score_obtained, 3)
+        self.assertFalse(result.student_answers["1"]["needs_review"])
+        self.assertEqual(result.scanned_image_url, "https://p.supabase.co/x.jpg")     # image kept
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        self.client.force_authenticate(self.teacher)
+        self.assertEqual(self.client.delete(url).status_code, 204)
+        self.quiz.refresh_from_db()
+        self.assertEqual(self.quiz.attendees_count, 0)
+
+    def test_images_expire_on(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        QuizResult.objects.create(quiz=self.quiz, student=self.kid, score_obtained=1, scanned_image_url="https://p.supabase.co/x.jpg")
+        data = self.client.get(f"/gradely/quizzes/{self.quiz.id}/").data
+        self.assertEqual(str(data["images_expire_on"]), str((timezone.now() + timedelta(days=3)).date()))
+        self.assertIsNotNone(data["date_given"])
+
+    # --- students -----------------------------------------------------------
+    def test_add_one_student(self):
+        url = f"/gradely/classrooms/{self.room.id}/add_student/"
+        other_room = Classroom.objects.create(teacher=self.other, subject=self.subject, section_name="Luna")
+        twin = Student.objects.create(name="Ben Reyes", student_id="260002")
+        other_room.students.add(twin)
+
+        response = self.client.post(url, {"name": "  ben reyes "}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["candidates"][0]["classes"], ["SCI6 Luna"])
+        self.assertEqual(self.client.post(url, {"student_pk": twin.id}, format="json").status_code, 201)
+        self.assertTrue(self.room.students.filter(id=twin.id).exists())
+        self.assertEqual(self.client.post(url, {"name": "Ben Reyes", "create_new": True}, format="json").status_code, 201)
+        self.assertEqual(Student.objects.filter(name="Ben Reyes").count(), 2)
+        self.assertEqual(self.client.post(url, {"student_pk": twin.id}, format="json").status_code, 400)  # already in
+        self.assertEqual(self.client.post(url, {"name": "Cy Lim"}, format="json").data["student"]["student_id"][:2], "26")
+
+    def test_import_keeps_same_name_students_apart(self):
+        twin = Student.objects.create(name="Ben Reyes", student_id="250005")
+        csv_file = SimpleUploadedFile("r.csv", b"name,student_id\nAna Cruz,\nBen Reyes,\nBen Reyes,\nCy Lim,250005\nDee,12\n")
+        response = self.client.post(f"/gradely/classrooms/{self.room.id}/upload-students/", {"file": csv_file})
+        self.assertEqual(response.status_code, 200, response.data)
+        names = sorted(self.room.students.values_list("name", flat=True))
+        # Ana reused, two different Bens (one existing, one new), ID 250005 kept its own name, Dee skipped
+        self.assertEqual(names, ["Ana Cruz", "Ben Reyes", "Ben Reyes"])
+        self.assertTrue(self.room.students.filter(id=twin.id).exists())
+        self.assertEqual(Student.objects.filter(name="Ana Cruz").count(), 1)
+        self.assertTrue(any("250005 belongs to Ben Reyes" in w for w in response.data["warnings"]))
+        self.assertTrue(any("Row 6" in w for w in response.data["warnings"]))
+
+    def test_student_results_and_gradebook(self):
+        quiz2 = Quiz.objects.create(classroom=self.room, title="Quiz 2", total_score=10)
+        QuizResult.objects.create(quiz=self.quiz, student=self.kid, score_obtained=4)
+        QuizResult.objects.create(quiz=quiz2, student=self.kid, score_obtained=5)
+        data = self.client.get(f"/gradely/classrooms/{self.room.id}/students/{self.kid.id}/").data
+        self.assertEqual([q["percent"] for q in data["quizzes"]], [100.0, 50.0])
+        self.assertEqual((data["average_percent"], data["taken"]), (75.0, 2))
+        self.assertEqual([q["passed"] for q in data["quizzes"]], [True, False])
+
+        csv_text = b"".join(self.client.get(f"/gradely/classrooms/{self.room.id}/gradebook/")).decode("utf-8-sig")
+        self.assertIn("Student ID,Name,Quiz 1,Quiz 2,Quizzes Taken,Average %", csv_text)
+        self.assertIn("260001,Ana Cruz,4,5,2,75.0%", csv_text)
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.get(f"/gradely/classrooms/{self.room.id}/gradebook/").status_code, 404)

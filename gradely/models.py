@@ -1,5 +1,6 @@
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
+from django.utils import timezone
 from django.contrib.auth.models import AbstractUser, UserManager
 
 # ==========================================
@@ -83,7 +84,8 @@ class Classroom(models.Model):
     It connects a Teacher + Subject + Section Name.
     """
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, limit_choices_to={'role': User.Role.FACULTY})
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
+    # PROTECT: a subject is shared by many teachers' classes, so deleting it must never take them along
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT)
     
     section_name = models.CharField(max_length=50) 
     school_year = models.CharField(max_length=20)
@@ -101,6 +103,7 @@ class Classroom(models.Model):
 class Quiz(models.Model):
     classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name='quizzes')
     title = models.CharField(max_length=200)
+    date_given = models.DateField(default=timezone.localdate, null=True, blank=True)  # when students took it
     # Number of items on the answer sheet; every item is worth 1 point.
     total_score = models.IntegerField(
         default=50,
@@ -122,23 +125,14 @@ class Quiz(models.Model):
         return f"{self.title} - {self.classroom.section_name}"
 
     def update_statistics(self):
-        """
-        Helper method to recalculate stats whenever a new result is added.
-        """
-        results = self.results.all()
-        if results.exists():
-            scores = [r.score_obtained for r in results]
-            self.attendees_count = len(scores)
-            self.max_score = max(scores)
-            self.min_score = min(scores)
-            self.mean_score = sum(scores) / len(scores)
-        else:
-            self.mean_score = 0.0
-            self.min_score = 0.0
-            self.max_score = 0.0
-            self.attendees_count = 0
-        
-        self.save()
+        """Recalculates the cached stats after results are added, edited or deleted."""
+        stats = self.results.aggregate(count=models.Count('id'), mean=models.Avg('score_obtained'),
+                                       low=models.Min('score_obtained'), high=models.Max('score_obtained'))
+        self.attendees_count = stats['count']
+        self.mean_score = float(stats['mean'] or 0)
+        self.min_score = float(stats['low'] or 0)
+        self.max_score = float(stats['high'] or 0)
+        self.save(update_fields=['attendees_count', 'mean_score', 'min_score', 'max_score'])
 
 class QuizResult(models.Model):
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='results')
@@ -147,6 +141,7 @@ class QuizResult(models.Model):
     score_obtained = models.DecimalField(max_digits=5, decimal_places=2)
     student_answers = models.JSONField(default=dict, blank=True)
     scanned_image_url = models.URLField(max_length=500, null=True, blank=True)
+    entered_manually = models.BooleanField(default=False)  # typed in by the teacher, not scanned
     date_taken = models.DateTimeField(auto_now_add=True)
 
     class Meta:

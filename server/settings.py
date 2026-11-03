@@ -21,9 +21,13 @@ if os.path.exists(env_file):
 # ==========================================
 
 SECRET_KEY = env('SECRET_KEY')
-DEBUG = env.bool('DEBUG', default=True)
+# Off unless DEBUG=True is set (in your local .env): debug pages show code and settings to anyone.
+DEBUG = env.bool('DEBUG', default=False)
 
-ALLOWED_HOSTS = ['*']
+# Render provides RENDER_EXTERNAL_HOSTNAME; add others (a custom domain) with ALLOWED_HOSTS=a.com,b.com
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1', '.onrender.com'])
+if os.environ.get('RENDER_EXTERNAL_HOSTNAME'):
+    ALLOWED_HOSTS.append(os.environ['RENDER_EXTERNAL_HOSTNAME'])
 
 
 # ==========================================
@@ -136,11 +140,15 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    # The frontend only uses JWT; Basic/Session auth would be extra ways in.
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.BasicAuthentication',
     ],
+    # Per-IP limits for the views that set throttle_scope (login, password change, sign-up)
+    'DEFAULT_THROTTLE_RATES': {
+        'login': '10/min',
+        'signup': '20/hour',
+    },
 }
 
 SIMPLE_JWT = {

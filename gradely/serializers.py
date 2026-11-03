@@ -1,21 +1,28 @@
 import math
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.db.models import Count
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .models import User, Subject, Classroom, Quiz, QuizResult, Student
 
 
-# For faculty signup
+# For faculty signup. Sign-ups are always faculty; admins are made from the Django admin
+# or by promoting an account, never by picking a role on a public form.
 class FacultySignupSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
-        fields = ['email', 'password', 'first_name', 'last_name', 'role']
+        fields = ['email', 'password', 'first_name', 'last_name']
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
 
     def validate_email(self, value):
         email = value.strip().lower()
@@ -24,14 +31,13 @@ class FacultySignupSerializer(serializers.ModelSerializer):
         return email
 
     def create(self, validated_data):
-        role = validated_data.get('role', 'FACULTY')
         user = User.objects.create_user(
             username=validated_data['email'],
             email=validated_data['email'],
             password=validated_data['password'],
             first_name=validated_data.get('first_name', ''),
             last_name=validated_data.get('last_name', ''),
-            role=role,
+            role=User.Role.FACULTY,
             is_approved=False
         )
         return user
@@ -43,18 +49,34 @@ class UserApprovalSerializer(serializers.ModelSerializer):
         fields = ['id', 'email', 'first_name', 'last_name', 'role', 'is_approved', 'date_joined']
         read_only_fields = ['email', 'role']
 
-# For user details
+# For user details (users may edit their own name)
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'email', 'first_name', 'last_name', 'role', 'is_approved', 'date_joined']
         read_only_fields = ['email', 'role', 'is_approved', 'date_joined']
 
+
+class PasswordChangeSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_current_password(self, value):
+        if not self.context['request'].user.check_password(value):
+            raise serializers.ValidationError("Your current password is incorrect.")
+        return value
+
+    def validate_new_password(self, value):
+        validate_password(value, self.context['request'].user)
+        return value
+
 # For subjects
 class SubjectSerializer(serializers.ModelSerializer):
+    class_count = serializers.IntegerField(read_only=True, default=0)   # SubjectViewSet annotation
+
     class Meta:
         model = Subject
-        fields = ['id', 'name', 'code', 'description', 'grade_level']
+        fields = ['id', 'name', 'code', 'description', 'grade_level', 'class_count']
 
 # For classrooms
 class ClassroomSerializer(serializers.ModelSerializer):
@@ -102,7 +124,7 @@ class QuizSerializer(serializers.ModelSerializer):
     class Meta:
         model = Quiz
         fields = [
-            'id', 'title', 'total_score', 'created_at', 'classroom', 
+            'id', 'title', 'total_score', 'date_given', 'created_at', 'classroom',
             'classroom_name', 'subject_code',
             'mean_score', 'max_score', 'min_score', 'attendees_count',
             'has_answer_key',
@@ -116,6 +138,11 @@ class QuizSerializer(serializers.ModelSerializer):
         if user.role != User.Role.ADMIN and classroom.teacher_id != user.id:
             raise serializers.ValidationError("You can only add quizzes to your own classes.")
         return classroom
+
+    def create(self, validated_data):
+        if not validated_data.get('date_given'):   # the form may send an empty date
+            validated_data['date_given'] = timezone.localdate()
+        return super().create(validated_data)
 
     def validate_total_score(self, value):
         if self.instance and value != self.instance.total_score and self.instance.results.exists():
@@ -138,7 +165,8 @@ class QuizResultSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuizResult
-        fields = ['id', 'student_name', 'student_id', 'score_obtained', 'student_answers', 'scanned_image_url', 'date_taken']
+        fields = ['id', 'student_name', 'student_id', 'score_obtained', 'student_answers', 'scanned_image_url',
+                  'entered_manually', 'date_taken']
 
 class QuizDetailSerializer(serializers.ModelSerializer):
     results = serializers.SerializerMethodField() 
@@ -153,15 +181,16 @@ class QuizDetailSerializer(serializers.ModelSerializer):
     teacher_name = serializers.SerializerMethodField()
     passing_mark = serializers.SerializerMethodField()
     image_retention_days = serializers.SerializerMethodField()
+    images_expire_on = serializers.SerializerMethodField()
 
     class Meta:
         model = Quiz
         fields = [
             'id', 'title', 'total_score', 'mean_score', 'min_score', 'max_score',
             'attendees_count', 'classroom', 'classroom_name', 'results', 'item_analysis', 'created_at',
-            'answer_key', 'has_answer_key',
+            'date_given', 'answer_key', 'has_answer_key',
             'subject_code', 'subject_name', 'grade_level', 'school_year', 'teacher_name', 'passing_mark',
-            'image_retention_days',
+            'image_retention_days', 'images_expire_on',
         ]
 
     def get_has_answer_key(self, obj):
@@ -177,6 +206,13 @@ class QuizDetailSerializer(serializers.ModelSerializer):
     def get_image_retention_days(self, obj):
         return settings.SCANNED_IMAGE_RETENTION_DAYS or None   # None: images are kept
 
+    def get_images_expire_on(self, obj):
+        """Roughly when the oldest graded image still stored will be deleted (None if nothing will be)."""
+        days = settings.SCANNED_IMAGE_RETENTION_DAYS
+        oldest = (obj.results.exclude(scanned_image_url__isnull=True).exclude(scanned_image_url='')
+                  .order_by('date_taken').values_list('date_taken', flat=True).first())
+        return (oldest + timedelta(days=days)).date() if days and oldest else None
+
     def get_results(self, obj):
         all_students = obj.classroom.students.all().order_by('name') 
         
@@ -190,21 +226,25 @@ class QuizDetailSerializer(serializers.ModelSerializer):
                 # Case A: Student has taken the quiz
                 data.append({
                     "id": result.id,
-                    "student_name": student.name, 
+                    "student_pk": student.id,
+                    "student_name": student.name,
                     "student_id": student.student_id,
                     "score_obtained": result.score_obtained,
                     "student_answers": result.student_answers,
                     "scanned_image_url": result.scanned_image_url,
+                    "entered_manually": result.entered_manually,
                     "date_taken": result.date_taken
                 })
             else:
                 data.append({
                     "id": f"temp-{student.id}",
+                    "student_pk": student.id,
                     "student_name": student.name,
                     "student_id": student.student_id,
                     "score_obtained": None, 
                     "student_answers": None,
                     "scanned_image_url": None,
+                    "entered_manually": False,
                     "date_taken": None
                 })
         
@@ -384,7 +424,7 @@ class AdminQuizSerializer(serializers.ModelSerializer):
     class Meta:
         model = Quiz
         fields = [
-            'id', 'title', 'total_score', 'created_at', 'classroom',
+            'id', 'title', 'total_score', 'date_given', 'created_at', 'classroom',
             'section_name', 'school_year', 'subject_code', 'subject_name', 'grade_level',
             'teacher_id', 'teacher_name',
             'class_size', 'attendees_count', 'passing_count', 'mean_score', 'min_score', 'max_score',

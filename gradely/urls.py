@@ -5,6 +5,7 @@ from .views import (
     AdminDashboardView,
     UserViewSet,
     CurrentUserView,
+    ChangePasswordView,
     FacultySignupView, 
     PendingFacultyListView, 
     ApproveFacultyView,
@@ -52,6 +53,7 @@ urlpatterns = [
     # Helper APIs
     path('classrooms/<int:classroom_id>/upload-students/', UploadStudentsView.as_view(), name='upload-list'),
     path('auth/users/me/', CurrentUserView.as_view(), name='current-user'),
+    path('auth/users/me/password/', ChangePasswordView.as_view(), name='change-password'),
     path('scanner/status/', ScannerStatusView.as_view(), name='scanner-status'),
 
     # Admin only

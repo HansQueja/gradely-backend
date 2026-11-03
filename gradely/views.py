@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.decorators import action
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from django.db import transaction
@@ -14,7 +15,7 @@ from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
-from . import answer_keys, exports, image_retention, scanner_client
+from . import answer_keys, exports, image_retention, rosters, scanner_client
 from .permissions import isSchoolAdmin
 from .student_ids import allocate_student_ids
 from .models import User, Classroom, Quiz, Subject, Student, QuizResult
@@ -27,6 +28,7 @@ from .serializers import (
     QuizSerializer, 
     SubjectSerializer,
     StudentSerializer,
+    PasswordChangeSerializer,
     StudentUploadSerializer,
     QuizDetailSerializer,
     QuizResultSerializer,
@@ -41,11 +43,32 @@ import pandas as pd
 import csv
 
 class CurrentUserView(APIView):
+    """GET your profile; PATCH {first_name, last_name} to edit your name."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
+
+    def patch(self, request):
+        serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class ChangePasswordView(APIView):
+    """POST {current_password, new_password}. Forgotten passwords are reset by an admin (Faculty page)."""
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
+
+    def post(self, request):
+        serializer = PasswordChangeSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        request.user.set_password(serializer.validated_data['new_password'])
+        request.user.save(update_fields=['password'])
+        return Response({"message": "Password changed."})
 
 #====================================
 #     ADMIN WORKS
@@ -86,6 +109,8 @@ class FacultySignupView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = FacultySignupSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'signup'
 
 # Admin: Lists faculty users that are not approved
 class PendingFacultyListView(generics.ListAPIView):
@@ -109,7 +134,8 @@ class ApproveFacultyView(generics.UpdateAPIView):
         return super().patch(request, *args, **kwargs)
 
 class RejectFacultyView(generics.DestroyAPIView):
-    queryset = User.objects.all()
+    # Only sign-ups still waiting for approval; approved accounts are managed on the Faculty page.
+    queryset = User.objects.filter(is_approved=False)
     permission_classes = [isSchoolAdmin]
     lookup_field = 'pk'
 
@@ -179,6 +205,8 @@ class AdminQuizViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 # To get the role on the passed token
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = [ScopedRateThrottle]   # slows down password guessing
+    throttle_scope = 'login'
 
 # ====================================
 #    USER PROFILE
@@ -226,21 +254,30 @@ class TeacherDashboardView(APIView):
     
 # Faculty: Subjects page
 class SubjectViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
     """
-    This handles EVERYTHING: 
-    - GET /api/subjects/ (List)
-    - POST /api/subjects/ (Create)
-    - PUT /api/subjects/5/ (Update)
-    - DELETE /api/subjects/5/ (Delete)
+    Subjects are shared by every teacher's classes.
+      GET, POST            any signed-in user (teachers add the subjects they teach)
+      PUT, PATCH, DELETE   admins only; a subject that still has classes can't be deleted
     """
-    queryset = Subject.objects.all().order_by('code')
+    queryset = Subject.objects.annotate(class_count=Count('classroom')).order_by('code')
     serializer_class = SubjectSerializer
-    permission_classes = [IsAuthenticated]
 
     # Enable filtering
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['grade_level']
+
+    def get_permissions(self):
+        if self.action in ('update', 'partial_update', 'destroy'):
+            return [isSchoolAdmin()]
+        return [IsAuthenticated()]
+
+    def destroy(self, request, *args, **kwargs):
+        subject = self.get_object()
+        if subject.class_count:
+            return Response({"error": f"{subject.code} is used by {subject.class_count} class(es). "
+                                      "Delete or move those classes first."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return super().destroy(request, *args, **kwargs)
 
 class ClassroomViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
@@ -342,6 +379,115 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+    @action(detail=True, methods=['post'])
+    def add_student(self, request, pk=None):
+        """
+        Adds one student without a roster file.
+        Payload: {"name": "Juan Dela Cruz"}, plus one of
+          "student_pk": 12      enroll this existing student (picked from the 409 candidates)
+          "create_new": true    a new student even though others share the name
+        Without either, a 409 lists existing students with that name so the teacher can choose.
+        """
+        classroom = self.get_object()
+        if request.data.get('student_pk'):
+            student = get_object_or_404(Student, id=request.data['student_pk'])
+            created = False
+        else:
+            name = rosters.clean_name(request.data.get('name'))
+            if not name:
+                return Response({"error": "Enter the student's name."}, status=status.HTTP_400_BAD_REQUEST)
+            matches = rosters.same_name_students(name)
+            if matches and not request.data.get('create_new'):
+                return Response({
+                    "error": f"{len(matches)} student(s) named {name} already exist. "
+                             "Choose one, or add a new student.",
+                    "candidates": [{
+                        "id": s.id, "student_id": s.student_id, "name": s.name,
+                        "in_this_class": any(c.id == classroom.id for c in s.classrooms.all()),
+                        "classes": [f"{c.subject.code} {c.section_name}" for c in s.classrooms.all()],
+                    } for s in matches],
+                }, status=status.HTTP_409_CONFLICT)
+            with transaction.atomic():
+                try:
+                    student = Student.objects.create(name=name, student_id=allocate_student_ids(1)[0])
+                except ValueError as e:
+                    return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            created = True
+
+        if classroom.students.filter(id=student.id).exists():
+            return Response({"error": f"{student.name} is already in this class."}, status=status.HTTP_400_BAD_REQUEST)
+        classroom.students.add(student)
+        return Response({"student": StudentSerializer(student).data, "created": created},
+                        status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path=r'students/(?P<student_pk>\d+)')
+    def student_results(self, request, pk=None, student_pk=None):
+        """One student's results on every quiz of this class."""
+        classroom = self.get_object()
+        student = get_object_or_404(classroom.students, id=student_pk)
+        results = {r.quiz_id: r for r in QuizResult.objects.filter(student=student, quiz__classroom=classroom)}
+        passing = settings.PASSING_PERCENT / 100
+        quizzes = []
+        for quiz in _quizzes_in_order(classroom):
+            result = results.get(quiz.id)
+            score = float(result.score_obtained) if result else None
+            quizzes.append({
+                "quiz_id": quiz.id, "title": quiz.title, "date": quiz.date_given or quiz.created_at.date(),
+                "total": quiz.total_score, "score": score,
+                "percent": round(score / quiz.total_score * 100, 1) if result else None,
+                "passed": score >= quiz.total_score * passing if result else None,
+                "class_mean": round(quiz.mean_score, 1) if quiz.attendees_count else None,
+                "has_image": bool(result and result.scanned_image_url),
+                "entered_manually": bool(result and result.entered_manually),
+            })
+        taken = [q["percent"] for q in quizzes if q["percent"] is not None]
+        return Response({
+            "student": StudentSerializer(student).data,
+            "classroom": {"id": classroom.id, "section_name": classroom.section_name,
+                          "subject_code": classroom.subject.code, "subject_name": classroom.subject.name,
+                          "school_year": classroom.school_year},
+            "quizzes": quizzes,
+            "average_percent": round(sum(taken) / len(taken), 1) if taken else None,
+            "taken": len(taken),
+        })
+
+    @action(detail=True, methods=['get'])
+    def gradebook(self, request, pk=None):
+        """CSV: every student in the class against every quiz, with each student's average %."""
+        classroom = self.get_object()
+        quizzes = _quizzes_in_order(classroom)
+        scores = {(r.student_id, r.quiz_id): r.score_obtained
+                  for r in QuizResult.objects.filter(quiz__classroom=classroom)}
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        filename = f"{classroom.subject.code}_{classroom.section_name}_Gradebook.csv".replace(' ', '_')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response.write('\ufeff')   # BOM so Excel reads names like "Peña" correctly
+        writer = csv.writer(response)
+        writer.writerow(['GRADEBOOK', f"{classroom.subject.code} {classroom.subject.name}",
+                         classroom.section_name, classroom.school_year])
+        writer.writerow([])
+        writer.writerow(['Student ID', 'Name'] + [q.title for q in quizzes] + ['Quizzes Taken', 'Average %'])
+        writer.writerow(['', 'Date'] + [(q.date_given or q.created_at.date()).isoformat() for q in quizzes] + ['', ''])
+        writer.writerow(['', 'Items'] + [q.total_score for q in quizzes] + ['', ''])
+        for student in classroom.students.order_by('name'):
+            row, percents = [], []
+            for quiz in quizzes:
+                score = scores.get((student.id, quiz.id))
+                if score is None:
+                    row.append('')
+                else:
+                    row.append(int(score) if score == int(score) else float(score))
+                    percents.append(float(score) / quiz.total_score * 100)
+            average = f"{round(sum(percents) / len(percents), 1)}%" if percents else ''
+            writer.writerow([student.student_id, student.name] + row + [len(percents), average])
+        return response
+
+
+def _quizzes_in_order(classroom):
+    return sorted(classroom.quizzes.all(), key=lambda q: (q.date_given or q.created_at.date(), q.created_at))
+
+
 class StudentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                      viewsets.GenericViewSet):
     """
@@ -396,35 +542,27 @@ class UploadStudentsView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # Existing students (matched by name) keep their ID; new ones get
-                # the next YYNNNN IDs for this year (see student_ids.py).
-                names = []
-                for raw in df['name']:
-                    name = str(raw).strip()
-                    if name and name.lower() != 'nan':
-                        names.append(name.title())
-                names = list(dict.fromkeys(names))  # de-duplicate, keep order
+                # Optional student_id column: pins a row to that exact student (see rosters.py).
+                id_column = next((c for c in ('student_id', 'student id', 'id') if c in df.columns), None)
+                rows = []
+                for index, record in df.iterrows():
+                    name = rosters.clean_name(record['name'])
+                    if name:
+                        sid = rosters.clean_id(record[id_column]) if id_column else ''
+                        rows.append((index + 2, name, sid))   # +2: header row and 1-based numbering
 
                 with transaction.atomic():
-                    existing = {s.name: s for s in Student.objects.filter(name__in=names)}
-                    new_names = [n for n in names if n not in existing]
                     try:
-                        new_ids = allocate_student_ids(len(new_names))
+                        students, created_count, warnings = rosters.resolve_rows(classroom, rows)
                     except ValueError as e:
                         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                    if students:
+                        classroom.students.add(*students)
 
-                    created = Student.objects.bulk_create(
-                        [Student(name=n, student_id=sid) for n, sid in zip(new_names, new_ids)]
-                    )
-                    students_to_create = list(existing.values()) + created
-
-                    if students_to_create:
-                        classroom.students.add(*students_to_create)
-                
                 return Response({
                     "status": "success",
-                    "message": f"Successfully processed {len(students_to_create)} students "
-                               f"({len(created)} new)."
+                    "message": f"Successfully processed {len(students)} students ({created_count} new).",
+                    "warnings": warnings,
                 }, status=status.HTTP_200_OK)
 
             except Classroom.DoesNotExist:
@@ -461,6 +599,37 @@ def _grade_answers(student_answers, key):
             "needs_review": bool(entry.get('needs_review', False)),
         }
     return score, graded
+
+
+class EntryError(ValueError):
+    pass
+
+
+def _entry_from_request(quiz, data):
+    """
+    A teacher-typed result: {"answers": {"1": "A", ...}} (graded against the key) or
+    {"score": 17} when only the score is known. Returns (score, student_answers).
+    """
+    if data.get('answers') is not None:
+        key = quiz.answer_key or {}
+        if len(key) != quiz.total_score:
+            raise EntryError("Set the complete answer key before entering answers.")
+        answers = data['answers']
+        if not isinstance(answers, dict):
+            raise EntryError("answers must map item numbers to letters.")
+        allowed = set(answer_keys.CHOICES) | {'-', ''}
+        for item, letter in answers.items():
+            if str(letter or '').strip().upper() not in allowed:
+                raise EntryError(f"Item {item}: answer must be one of {', '.join(answer_keys.CHOICES)} or blank.")
+        return _grade_answers({str(i): {"selected": a} for i, a in answers.items()}, key)
+
+    try:
+        score = float(data.get('score'))
+    except (TypeError, ValueError):
+        raise EntryError("Enter the answers or a score.")
+    if not 0 <= score <= quiz.total_score or score != int(score):
+        raise EntryError(f"Score must be a whole number from 0 to {quiz.total_score}.")
+    return int(score), {}
 
 
 def _regrade_results(quiz):
@@ -626,6 +795,7 @@ class QuizViewSet(viewsets.ModelViewSet):
                         'score_obtained': score,
                         'student_answers': answers,
                         'scanned_image_url': item.get('scanned_image_url'),
+                        'entered_manually': False,
                     }
                 )
                 saved_count += 1
@@ -638,6 +808,47 @@ class QuizViewSet(viewsets.ModelViewSet):
             "errors": errors
         })
     
+    @action(detail=True, methods=['post'])
+    def manual_result(self, request, pk=None):
+        """
+        Saves a result typed in by the teacher, for a sheet that can't be scanned.
+        Payload: {"student_pk": 12, "answers": {"1": "A", ...}} or {"student_pk": 12, "score": 17}.
+        """
+        quiz = self.get_object()
+        student = get_object_or_404(quiz.classroom.students, id=request.data.get('student_pk'))
+        try:
+            score, answers = _entry_from_request(quiz, request.data)
+        except EntryError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        result, _ = QuizResult.objects.update_or_create(
+            quiz=quiz, student=student,
+            defaults={'score_obtained': score, 'student_answers': answers,
+                      'scanned_image_url': None, 'entered_manually': True},
+        )
+        quiz.update_statistics()
+        return Response(QuizResultSerializer(result).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch', 'delete'], url_path=r'results/(?P<result_id>\d+)')
+    def result(self, request, pk=None, result_id=None):
+        """
+        PATCH {"answers": {...}} or {"score": n}: correct a saved result (its graded image is kept).
+        DELETE: remove a wrong result, e.g. a sheet saved under the wrong student.
+        """
+        quiz = self.get_object()
+        result = get_object_or_404(quiz.results, id=result_id)
+        if request.method == 'DELETE':
+            result.delete()
+            quiz.update_statistics()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        try:
+            result.score_obtained, result.student_answers = _entry_from_request(quiz, request.data)
+        except EntryError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        result.save(update_fields=['score_obtained', 'student_answers'])
+        quiz.update_statistics()
+        return Response(QuizResultSerializer(result).data)
+
     @action(detail=True, methods=['get'])
     def export_report(self, request, pk=None):
         """CSV report: quiz info, statistics, item analysis and every student's score (see exports.py)."""
